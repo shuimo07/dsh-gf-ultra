@@ -94,6 +94,23 @@ POST /api/stt  (16kHz PCM16/wav)   → {text, language}
 
 仓库 `bridge/smoke_tts.py` / `bridge/smoke_stt.py` 即现成测试脚本。
 
+## 自愈：每次点击「开启语音朗读」自动核对并修复
+
+开启朗读时，插件先确保桥接进程在线，再调用桥接的 `POST /api/selfheal`，
+把语音模块恢复到 `on/检验/` 记录的状态（**无需重启 web**，F5 即生效）：
+
+1. `POST /voice-bridge/start`（web 的 node 半端路由，确保 :8765 在线；回滚版 node 半端为空时该路由不存在，自动忽略）
+2. `POST /api/selfheal`（桥接端，`voice_bridge.py`）：
+   - **插件包**：live `E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice\` vs golden `E:\AI\dsh-voice-ai-girlfriend\dist\ui-voice\`（5 个运行文件哈希），不一致则整目录从 golden 恢复
+   - **web 下发**：比对 :3080 实际返回的 client.js 与 golden（若不一致给出 F5 提示）
+   - **音色库**：`assets\voices\` vs `canuse\voices-harness.zip`（含 `.active.json`），缺失/不一致则恢复
+3. 返回 `{ok, consistent, checked[], repaired[]}`，结果打印到浏览器 console（`[ui-voice] selfheal:`）
+
+注意：
+- 当前运行的是 **canuse + 自愈增强版**：`lib\client.js`（64,554 B → 66,3xx B，SHA256 `544106CF…`）比原始版多了 VoiceToggle 自检钩子；golden = `dist\ui-voice\`（profile 的 `file:` 依赖源，同步部署）。
+- `canuse\dsh-client-ui-voice-harness.zip` 保持**原始精简版**不动，作为纯净回滚基线；要增强版就按 golden 恢复。
+- 自愈修复插件后无需重启 web：DSH 按请求读文件、rev = 文件 SHA1（本次实测 rev `a939c5079090 → a8d1d8c68eee`）。
+
 ## 与 off/ 的关系
 
 - `off/` = 桥接断开状态（2026-08-18 快照）：web 跑、桥接不跑、launcher(:8768) 已删除。

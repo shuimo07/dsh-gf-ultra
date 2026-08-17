@@ -16,6 +16,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { VoiceInjected } from './contract.ts'
 import { ensureBridgeReady } from './voice/bridge-lifecycle.ts'
+import { selfHeal } from './bridge.ts'
 import css from './VoiceToggle.module.css'
 
 const VOICE_ENABLED_KEY = 's2s.voice.enabled'
@@ -65,8 +66,10 @@ export const VoiceToggle = memo(function VoiceToggle({ t, speaker, abortTts }: V
       } else {
         // Turning the reading ON: make sure the bridge is up. If it is down
         // the node-half watchdog re-spawns it; wait for /api/health to
-        // answer so the next reply actually reads.
+        // answer so the next reply actually reads. Also run the self-heal
+        // check (bridge up, plugin bundle, voice library vs canuse/on state).
         void ensureBridgeReady()
+        void selfHeal()
       }
       return next
     })

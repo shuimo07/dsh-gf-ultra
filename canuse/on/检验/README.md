@@ -14,8 +14,8 @@
 ## 二、插件状态（ui-voice）
 
 - 部署位置（live home）：`E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice\`
-- 版本：canuse 精简版 64.5KB —— `lib\client.js` = 64,554 B，SHA256 `8C5620D3E85E…`，与 `canuse\dsh-client-ui-voice-harness.zip` **逐文件一致（0 差异）**
-- web 实际下发：`/plugins/@deepseek-ai/dsh-client-ui-voice/client.js` 响应体哈希 = `8C56…`（= canuse）；boot HTML `rev = a939c5079090`（= 文件 SHA1，替换后按请求重算）
+- 版本：**canuse + 自愈增强版** —— `lib\client.js` SHA256 `544106CF89E4…`（比 canuse 原始版多一段 VoiceToggle 自检钩子），与 golden `E:\AI\dsh-voice-ai-girlfriend\dist\ui-voice\` **逐文件一致（0 差异）**
+- web 实际下发：`/plugins/@deepseek-ai/dsh-client-ui-voice/client.js` 响应体哈希 = `544106CF…`（= golden）；boot HTML `rev = a8d1d8c68eee`（= 文件 SHA1，替换后按请求重算）
 - node 半端 `lib/index.js` = 空（383 B）：桥接由脚本拉起；**web 重启后 `/voice-bridge/start` 路由会消失**
 
 ## 三、音色库
@@ -33,6 +33,7 @@
 | TTS 朗读 | POST `/api/tts` `{"text":"…"}` | ✅ 返回 `audio/wav` 356,396 B / **11.14s** @16kHz 单声道，RMS 5296.9 / peak 26838（非静音），耗时 10.1s |
 | STT 识别 | POST `/api/stt`（合成音频回灌，闭环） | ✅ 识别文本与原文一致（个别音近字属 ASR 正常误差） |
 | 音色管理 | `/api/voices/active|rename|delete|upload` | 接口就绪（未做破坏性测试） |
+| **自愈 selfheal** | POST `/api/selfheal`（点击「开启语音朗读」自动触发） | ✅ 实测：故意破坏 `lib\client.js` 后，自愈检出 `plugin:lib/client.js=drift` 并从 golden 整目录恢复，live/golden/web 下发哈希全部一致（web 未重启，rev 自动更新） |
 
 > 测试文案：*「你好呀，我是林起起。语音模块正在自检，这段话应该能被朗读出来，麦克风识别也应该正常。如果顺利，我们就可以继续聊天啦。」*
 

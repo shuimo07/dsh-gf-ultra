@@ -137,3 +137,26 @@ export class VadStream {
     }
   }
 }
+
+/**
+ * Self-heal: verify the voice stack matches the recorded canuse/on state and
+ * repair drift (bridge process up, plugin bundle, voice library). Fired on
+ * every reading-ON click. Best-effort: failures are logged, never block.
+ */
+export async function selfHeal(): Promise<void> {
+  try {
+    // 1) ensure the bridge process is up (node-half route; 404 when the
+    //    rolled-back node half is empty - the launcher scripts then apply).
+    try {
+      await fetch(`${location.origin}/voice-bridge/start`, { method: 'POST', signal: AbortSignal.timeout(30_000) })
+    } catch {
+      // route missing / web unreachable - bridge may already be up
+    }
+    // 2) full state check + repair on the bridge.
+    const resp = await fetch(`${bridgeBase()}/api/selfheal`, { method: 'POST', signal: AbortSignal.timeout(60_000) })
+    const report = (await resp.json().catch(() => null)) as { consistent?: boolean; repaired?: string[] } | null
+    console.log('[ui-voice] selfheal:', report)
+  } catch (err) {
+    console.warn('[ui-voice] selfheal failed:', err)
+  }
+}
