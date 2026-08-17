@@ -1,9 +1,17 @@
 @echo off
 setlocal
-REM ---- 小雅 AI 女友 一键启动：LLM + 口型数字人 + 语音桥接 ----
+REM ---- 小雅 AI 女友 一键启动：LLM + 口型数字人 + 语音桥接 + launcher ----
 set "SCRATCH=E:\AI\dsh-voice-ai-girlfriend\.scratch"
 set "TMP=%SCRATCH%"
 set "TEMP=%SCRATCH%"
+set "VENV_PY=E:\AI\dsh-voice-ai-girlfriend\venv-speech\Scripts\python.exe"
+
+REM 0) always-on launcher (:8768) — the one-click on/off controller
+set HAS_LAUNCHER=0
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8768" ^| findstr "LISTENING"') do set HAS_LAUNCHER=1
+if not "%HAS_LAUNCHER%"=="1" (
+  start "launcher" /min "%VENV_PY%" -m uvicorn launcher:app --host 127.0.0.1 --port 8768
+)
 
 REM 1) llama-server (LLM, :8090)
 set HAS_LLM=0

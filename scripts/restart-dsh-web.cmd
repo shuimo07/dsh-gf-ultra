@@ -15,6 +15,14 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":3081" ^| findstr "LISTENING
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":3080" ^| findstr "LISTENING"') do taskkill /F /PID %%p >nul 2>&1
 timeout /t 3 /nobreak >nul
 
+REM 0) Ensure the always-on launcher (:8768) is up.
+set HAS_LAUNCHER=0
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8768" ^| findstr "LISTENING"') do set HAS_LAUNCHER=1
+if not "%HAS_LAUNCHER%"=="1" (
+  start "launcher" /min "%VENV_PY%" -m uvicorn launcher:app --host 127.0.0.1 --port 8768
+  timeout /t 3 /nobreak >nul
+)
+
 REM 2) (Re)start the voice bridge if :8765 is not listening.
 set HAS_BRIDGE=0
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8765" ^| findstr "LISTENING"') do set HAS_BRIDGE=1

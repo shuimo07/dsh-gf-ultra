@@ -18,6 +18,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { bridgeBase } from '../bridge.ts'
 import type { VoiceInjected } from '../contract.ts'
+import { syncBridge, syncCompanion } from './lifecycle.ts'
 import css from './CompanionWindow.module.css'
 
 const WIDTH_KEY = 's2s.voice.companionW'
@@ -73,21 +74,21 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
   }, [companion])
 
   // One-click backend lifecycle: showing the window starts the digital human
-  // (LiveTalking :8010) and the local LLM (llama-server :8090) via the bridge;
-  // hiding it stops them. The bridge endpoints are no-ops when the services
-  // are already up/down.
+  // (LiveTalking :8010) and the local LLM (llama-server :8090) via the
+  // always-on launcher; hiding it stops them. The voice bridge runs while the
+  // window is shown OR voice reading is on (see syncBridge).
   const companionStartedRef = useRef(false)
   useEffect(() => {
-    const base = bridgeBase()
     if (visible) {
       if (!companionStartedRef.current) {
         companionStartedRef.current = true
-        fetch(`${base}/api/companion/start`, { method: 'POST' }).catch(() => {})
+        syncCompanion(true)
       }
     } else if (companionStartedRef.current) {
       companionStartedRef.current = false
-      fetch(`${base}/api/companion/stop`, { method: 'POST' }).catch(() => {})
+      syncCompanion(false)
     }
+    syncBridge()
   }, [visible])
 
   // Re-try the digital-human connection when the window is shown (the server
