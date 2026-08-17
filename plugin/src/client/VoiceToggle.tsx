@@ -11,7 +11,6 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 // Type-only: pulls ui-conversation's SlotMap merge for PropsRuntime resolution.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { VoiceInjected } from './contract.ts'
-import { syncBridge } from './voice/lifecycle.ts'
 import css from './VoiceToggle.module.css'
 
 const VOICE_ENABLED_KEY = 's2s.voice.enabled'
@@ -54,13 +53,11 @@ export const VoiceToggle = memo(function VoiceToggle({ t, speaker, abortTts }: V
       }
       if (!next) {
         // Turning the reading OFF: interrupt any reply currently being read
-        // and abort the in-flight TTS request; the launcher stops the heavy
-        // bridge unless the companion window is still shown.
+        // and abort the in-flight TTS request so the bridge stops
+        // synthesizing instead of draining its queue.
         speaker.stop()
         abortTts()
       }
-      // Reconcile the voice bridge process with the new enabled state.
-      syncBridge()
       return next
     })
   }, [speaker, abortTts])

@@ -1,0 +1,35 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "cors_origins": ["http://127.0.0.1:3080", "http://localhost:3080"],
+  "stt": {
+    "backend": "funasr",
+    "model_name": "models/funasr/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    "device": "cuda",
+    "torch_dtype": "float16",
+    "compile_mode": null,
+    "language": "zh",
+    "gen_kwargs": {
+      "max_new_tokens": 128,
+      "num_beams": 2,
+      "return_timestamps": false,
+      "task": "transcribe"
+    }
+  },
+  "tts": {
+    "model_name": "Qwen3-TTS-12Hz-1.7B-Base",
+    "device": "cuda",
+    "dtype": "auto",
+    "attn_implementation": "eager",
+    "ref_audio": "ref_audio.wav",
+    "ref_text": "你好呀，我是小雅。以后的日子里，我会一直陪着你，听你说话，陪你聊天。不管开心还是难过，都可以告诉我哦。",
+    "voices_dir": "assets/voices",
+    "language": "zh",
+    "speaker": null,
+    "xvec_only": false,
+    "parity_mode": false,
+    "non_streaming_mode": true,
+    "max_new_tokens": 1536,
+    "blocksize": 512
+  }
+}

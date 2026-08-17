@@ -10,10 +10,13 @@ Buildout (see DSH-语音接入-设计方案.md):
   T1  skeleton + /api/health                          done
   T2  /api/stt   (WhisperSTTHandler, lazy load)       done
   T3  /api/tts   (Qwen3TTSHandler, lazy load)         done
-  T8  /api/media/* lists + /media/* static mounts     <- current step
+
+Final state: voice module only (STT / TTS / 音色管理). The companion
+digital-human features (skins / media / QQ push / LiveTalking / llama) were
+removed when that part of the project was abandoned — see the repo README.
 
 Run:
-  D:\\speech-to-speech\\venv-speech\\Scripts\\python.exe -m uvicorn voice_bridge:app \
+  venv-speech\\Scripts\\python.exe -m uvicorn voice_bridge:app \
       --host 127.0.0.1 --port 8765
 """
 
@@ -24,16 +27,12 @@ import io
 import json
 import logging
 import os
-import subprocess
-import sys
 import threading
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 HERE = Path(__file__).resolve().parent
@@ -81,12 +80,6 @@ def load_config() -> dict:
     tts.setdefault("voices_dir", "assets/voices")
     if tts.get("voices_dir"):
         tts["voices_dir"] = _resolve_path(tts["voices_dir"])
-
-    media = cfg.setdefault("media", {})
-    media.setdefault("skins_dir", "assets/skins")
-    for key in ("bg_images_dir", "task_videos_dir", "skins_dir"):
-        if media.get(key):
-            media[key] = _resolve_path(media[key])
 
     return cfg
 
@@ -173,27 +166,6 @@ class ModelManager:
                 self._tts_error = f"{type(exc).__name__}: {exc}"
                 raise HTTPException(status_code=503, detail=f"TTS model load failed: {self._tts_error}")
         return self._tts
-
-    async def unload(self) -> None:
-        """Drop the loaded STT/TTS handlers and free GPU memory (voice features off)."""
-        async with self._load_lock:
-            self._stt = None
-            self._tts = None
-            self._tts_voice = None
-            self._stt_error = None
-            self._tts_error = None
-        # Best-effort CUDA cache release (only if torch is already imported).
-        try:
-            if "torch" in sys.modules:
-                import gc
-
-                import torch
-
-                gc.collect()
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-        except Exception:  # noqa: BLE001 - freeing memory is best-effort
-            logger.exception("model unload cache cleanup failed")
 
 
 def _load_stt_handler():
@@ -430,129 +402,6 @@ def _pcm16_to_wav(samples: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-# ── Companion media hosting (T8) + skins (T9) ───────────────────────────────
-
-BG_IMAGES_DIR = Path(CONFIG["media"]["bg_images_dir"])
-TASK_VIDEOS_DIR = Path(CONFIG["media"]["task_videos_dir"])
-SKINS_ROOT = Path(CONFIG["media"].get("skins_dir", str(REPO_ROOT / "assets" / "skins")))
-SKINS_STATE = SKINS_ROOT / ".active.json"
-VIDEO_EXTS = {".mp4", ".webm", ".ogg", ".mov", ".m4v"}
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
-
-
-def _list_media(directory: Path) -> list[dict]:
-    if not directory.is_dir():
-        return []
-    entries = []
-    for name in sorted(os.listdir(directory)):
-        ext = Path(name).suffix.lower()
-        if ext in VIDEO_EXTS:
-            entries.append({"name": name, "type": "video"})
-        elif ext in IMAGE_EXTS:
-            entries.append({"name": name, "type": "image"})
-    return entries
-
-
-def _list_skins() -> list[str]:
-    """Skin names = non-hidden subdirectories of the skins root (sorted)."""
-    if not SKINS_ROOT.is_dir():
-        return []
-    return sorted(
-        entry.name
-        for entry in SKINS_ROOT.iterdir()
-        if entry.is_dir() and not entry.name.startswith(".")
-    )
-
-
-def _read_active_skin() -> str | None:
-    """Active skin name, persisted in `.active.json`; falls back to the first skin."""
-    skins = _list_skins()
-    if not skins:
-        return None
-    try:
-        if SKINS_STATE.is_file():
-            state = json.loads(SKINS_STATE.read_text(encoding="utf-8"))
-            name = str(state.get("active", ""))
-            if name in skins:
-                return name
-    except Exception:  # noqa: BLE001 - corrupt state falls back to the first skin
-        pass
-    return skins[0]
-
-
-def _skin_dirs(skin: str | None) -> tuple[Path, Path] | None:
-    if skin is None:
-        return None
-    return SKINS_ROOT / skin / "bg", SKINS_ROOT / skin / "talk"
-
-
-def _bg_dir() -> Path:
-    pair = _skin_dirs(_read_active_skin())
-    return pair[0] if pair is not None else BG_IMAGES_DIR
-
-
-def _talk_dir() -> Path:
-    pair = _skin_dirs(_read_active_skin())
-    return pair[1] if pair is not None else TASK_VIDEOS_DIR
-
-
-@app.get("/api/media/bg-images")
-async def media_bg_images() -> dict:
-    """Idle/background media list for the active skin (videos + images, name-sorted)."""
-    return {"media": _list_media(_bg_dir())}
-
-
-@app.get("/api/media/task-videos")
-async def media_task_videos() -> dict:
-    """Speaking-animation video list for the active skin (videos only, name-sorted)."""
-    return {
-        "videos": [
-            entry["name"]
-            for entry in _list_media(_talk_dir())
-            if entry["type"] == "video"
-        ]
-    }
-
-
-# ── Skins: list / switch / upload ───────────────────────────────────────────
-
-@app.get("/api/skins")
-async def skins_list() -> dict:
-    """Available skins (name + per-slot video lists), plus the active one."""
-    return {"skins": _skins_payload(), "active": _read_active_skin()}
-
-
-def _skins_payload() -> list[dict]:
-    payload = []
-    for name in _list_skins():
-        bg, talk = _skin_dirs(name)  # type: ignore[misc]
-        payload.append(
-            {
-                "name": name,
-                "bg": [entry["name"] for entry in _list_media(bg)],
-                "talk": [entry["name"] for entry in _list_media(talk) if entry["type"] == "video"],
-            }
-        )
-    return payload
-
-
-class SkinActiveRequest(BaseModel):
-    skin: str
-
-
-class SkinCreateRequest(BaseModel):
-    name: str
-
-
-class SkinRenameRequest(BaseModel):
-    old: str
-    new: str
-
-
-class SkinDeleteRequest(BaseModel):
-    name: str
-
-
 def _send_to_recycle_bin(path: str) -> None:
     """Move a file/folder to the Windows Recycle Bin (undo-able) via SHFileOperationW."""
     import ctypes
@@ -588,118 +437,6 @@ def _validate_item_name(name: str) -> str:
     if not cleaned or cleaned.startswith(".") or "/" in cleaned or "\\" in cleaned or ".." in cleaned:
         raise HTTPException(status_code=400, detail="invalid name")
     return cleaned
-
-
-@app.post("/api/skins/rename")
-async def skins_rename(req: SkinRenameRequest) -> dict:
-    """Rename a skin folder; keeps it active if it was the active skin."""
-    old = _validate_item_name(req.old)
-    new = _validate_item_name(req.new)
-    old_dir = SKINS_ROOT / old
-    if not old_dir.is_dir():
-        raise HTTPException(status_code=404, detail=f"skin not found: {old}")
-    new_dir = SKINS_ROOT / new
-    if new_dir.exists():
-        raise HTTPException(status_code=409, detail=f"skin already exists: {new}")
-    try:
-        old_dir.rename(new_dir)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"rename failed: {exc}") from exc
-    if _read_active_skin() == old:
-        SKINS_STATE.write_text(json.dumps({"active": new}, ensure_ascii=False), encoding="utf-8")
-    logger.info("skin %s -> %s", old, new)
-    return {"skins": _skins_payload(), "active": _read_active_skin()}
-
-
-@app.post("/api/skins/delete")
-async def skins_delete(req: SkinDeleteRequest) -> dict:
-    """Delete a skin folder into the Windows Recycle Bin (undo-able)."""
-    name = _validate_item_name(req.name)
-    target = SKINS_ROOT / name
-    if not target.is_dir():
-        raise HTTPException(status_code=404, detail=f"skin not found: {name}")
-    was_active = _read_active_skin() == name
-    try:
-        _send_to_recycle_bin(target)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"recycle bin failed: {exc}") from exc
-    remaining = _list_skins()
-    if was_active:
-        if remaining:
-            SKINS_STATE.write_text(json.dumps({"active": remaining[0]}, ensure_ascii=False), encoding="utf-8")
-        else:
-            SKINS_STATE.unlink(missing_ok=True)
-    logger.info("skin %s deleted (recycle bin)", name)
-    return {"skins": _skins_payload(), "active": _read_active_skin()}
-
-
-@app.post("/api/skins/create")
-async def skins_create(req: SkinCreateRequest) -> dict:
-    """Create a new skin folder (assets/skins/<name>/bg + talk)."""
-    name = Path(req.name).name.strip()
-    if not name or name.startswith(".") or "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(status_code=400, detail="invalid skin name")
-    try:
-        (SKINS_ROOT / name / "bg").mkdir(parents=True, exist_ok=True)
-        (SKINS_ROOT / name / "talk").mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"cannot create skin: {exc}") from exc
-    logger.info("skin %s created", name)
-    return {"skins": _skins_payload(), "active": _read_active_skin()}
-
-
-@app.post("/api/skins/active")
-async def skins_set_active(req: SkinActiveRequest) -> dict:
-    """Switch the active skin (persisted, so restarts keep the choice)."""
-    if req.skin not in _list_skins():
-        raise HTTPException(status_code=404, detail=f"skin not found: {req.skin}")
-    try:
-        SKINS_ROOT.mkdir(parents=True, exist_ok=True)
-        SKINS_STATE.write_text(
-            json.dumps({"active": req.skin}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"cannot persist skin: {exc}") from exc
-    return {"skins": _skins_payload(), "active": req.skin}
-
-
-@app.post("/api/skins/upload")
-async def skins_upload(skin: str, slot: str, file: UploadFile) -> dict:
-    """Upload a video into a skin's bg/talk folder (companion skin manager)."""
-    if slot not in ("bg", "talk"):
-        raise HTTPException(status_code=400, detail="slot must be bg or talk")
-    if skin not in _list_skins():
-        raise HTTPException(status_code=404, detail=f"skin not found: {skin}")
-    allowed_exts = VIDEO_EXTS | IMAGE_EXTS if slot == "bg" else VIDEO_EXTS
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in allowed_exts:
-        raise HTTPException(status_code=400, detail=f"unsupported file type {ext} (bg accepts video/image, talk accepts video)")
-    target_dir = SKINS_ROOT / skin / slot
-    target_dir.mkdir(parents=True, exist_ok=True)
-    name = Path(file.filename or f"clip{ext}").name
-    dest = target_dir / name
-    if dest.exists():
-        stem = dest.stem
-        counter = 1
-        while (target_dir / f"{stem}-{counter}{ext}").exists():
-            counter += 1
-        dest = target_dir / f"{stem}-{counter}{ext}"
-    MAX_UPLOAD_BYTES = 200 * 1024 * 1024
-    size = 0
-    try:
-        with dest.open("wb") as out:
-            while chunk := await file.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    dest.unlink(missing_ok=True)
-                    raise HTTPException(status_code=413, detail="file too large (max 200MB)")
-                out.write(chunk)
-    except HTTPException:
-        raise
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"write failed: {exc}") from exc
-    return {"ok": True, "skin": skin, "slot": slot, "file": dest.name}
 
 
 # ── Voices: reference-audio timbre management ───────────────────────────────
@@ -934,219 +671,6 @@ async def voices_upload(voice: str, text: str, file: UploadFile) -> dict:
     return {"ok": True, "voice": name, "duration": round(duration, 1), "active": name}
 
 
-# Dynamic Range-capable video serving for the active skin's folders.
-@app.get("/media/bg-images/{name:path}")
-async def media_bg_file(name: str) -> Response:
-    return _serve_media(_bg_dir(), name)
-
-
-@app.get("/media/task-videos/{name:path}")
-async def media_talk_file(name: str) -> Response:
-    return _serve_media(_talk_dir(), name)
-
-
-def _serve_media(directory: Path, name: str) -> Response:
-    if not directory.is_dir() or "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(status_code=404, detail="not found")
-    file = directory / name
-    if not file.is_file():
-        raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(file)
-
-
-# ── QQ 推送（NapCat OneBot）───────────────────────────────────────────────
-#
-# Sends text and TTS voice to a target QQ via a local NapCat OneBot v11 HTTP
-# endpoint. Config (bridge-config.json):
-#   "qq": {
-#     "enabled": true,
-#     "napcat_base": "http://127.0.0.1:3000",
-#     "napcat_token": "",
-#     "target_qq": 0
-#   }
-
-class QQSendRequest(BaseModel):
-    text: str
-    voice: bool = False
-    user_id: int | None = None  # override the configured target
-
-
-class QQImageRequest(BaseModel):
-    path: str
-    user_id: int | None = None
-
-
-@app.post("/api/qq/image")
-async def qq_send_image(req: QQImageRequest) -> dict:
-    """Send a local image file to the configured QQ."""
-    qq = CONFIG.get("qq", {})
-    if not qq.get("enabled"):
-        raise HTTPException(status_code=400, detail="QQ push disabled in bridge-config.json")
-    base = qq.get("napcat_base", "http://127.0.0.1:3000")
-    token = qq.get("napcat_token", "")
-    user_id = req.user_id or qq.get("target_qq")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="target_qq not configured")
-    if not Path(req.path).is_file():
-        raise HTTPException(status_code=404, detail=f"image not found: {req.path}")
-    from qq_bridge import send_image
-
-    try:
-        result = send_image(base, token, user_id, req.path)
-        return {"ok": True, "user_id": user_id, "napcat": result}
-    except Exception as exc:  # noqa: BLE001 - surfaced to the client
-        logger.exception("QQ image send failed")
-        raise HTTPException(status_code=502, detail=f"QQ image send failed: {exc}") from exc
-
-
-@app.post("/api/qq/send")
-async def qq_send(req: QQSendRequest) -> dict:
-    """Send { text } (and optionally TTS voice) to the configured QQ."""
-    qq = CONFIG.get("qq", {})
-    if not qq.get("enabled"):
-        raise HTTPException(status_code=400, detail="QQ push disabled in bridge-config.json")
-    base = qq.get("napcat_base", "http://127.0.0.1:3000")
-    token = qq.get("napcat_token", "")
-    user_id = req.user_id or qq.get("target_qq")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="target_qq not configured")
-    if not req.text.strip() and not req.voice:
-        raise HTTPException(status_code=400, detail="Empty text")
-
-    from qq_bridge import send_text, send_voice
-
-    try:
-        if req.voice:
-            if not req.text.strip():
-                raise HTTPException(status_code=400, detail="voice needs text to synthesize")
-            text = (req.text or "").strip()[:512]
-            cancel = threading.Event()
-            async with models.infer_lock:
-                handler = await models.ensure_tts()
-                samples = await asyncio.to_thread(_synthesize, handler, text, cancel)
-            result = send_voice(base, token, user_id, samples.astype("<i2").tobytes())
-        else:
-            result = send_text(base, token, user_id, req.text.strip()[:2000])
-        return {"ok": True, "user_id": user_id, "napcat": result}
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001 - surfaced to the client
-        logger.exception("QQ send failed")
-        raise HTTPException(status_code=502, detail=f"QQ send failed: {exc}") from exc
-
-
-# ── QQ 双向：事件接收 + 插件 WS 桥 ────────────────────────────────────────
-#
-# NapCat 把消息事件 POST 到 /api/qq/event（HTTP 上报 postUrls）；桥接再把
-# 私聊文本推给已连接的浏览器插件（/api/qq/ws）。插件注入 DSH，回复完成后
-# 把回复文本发回桥接（WS {"type":"reply"}），桥接 TTS→silk→QQ 发出。
-# 单连接设计（个人使用）：新连接顶掉旧连接。
-
-_qq_ws_conn: WebSocket | None = None
-_qq_ws_lock = asyncio.Lock()
-
-
-async def _qq_push(json_msg: dict) -> None:
-    global _qq_ws_conn
-    async with _qq_ws_lock:
-        conn = _qq_ws_conn
-    if conn is not None:
-        try:
-            await conn.send_json(json_msg)
-        except Exception:
-            logger.debug("QQ ws push failed (client gone)", exc_info=True)
-
-
-@app.post("/api/qq/event")
-async def qq_event(body: dict) -> dict:
-    """OneBot v11 HTTP 上报入口（NapCat postUrls）。私聊文本消息 → 推给插件。"""
-    try:
-        post_type = body.get("post_type")
-        if post_type == "message" and body.get("message_type") == "private":
-            user_id = body.get("user_id")
-            text = str(body.get("raw_message") or body.get("message") or "").strip()
-            if user_id and text:
-                await _qq_push({"type": "qq_message", "user_id": user_id, "text": text})
-                logger.info("QQ event: %s -> %s", user_id, text[:40])
-    except Exception:  # noqa: BLE001 - never break the upstream event feed
-        logger.exception("QQ event handling failed")
-    return {"ok": True}
-
-
-@app.websocket("/api/qq/onebot")
-async def qq_onebot_ws(ws: WebSocket) -> None:
-    """NapCat WebSocket 客户端连到这里（OneBot 事件推送）。
-
-    在 NapCat WebUI 网络配置里添加一个「WebSocket 客户端」指向
-    ws://127.0.0.1:8765/api/qq/onebot，NapCat 会把全部事件推过来；
-    私聊文本消息同样经 _qq_push 转给浏览器插件。这绕开了 HTTP 3000
-    服务不稳定时的事件上报缺口。
-    """
-    await ws.accept()
-    try:
-        while True:
-            raw = await ws.receive_text()
-            if not raw.strip():
-                continue
-            try:
-                body = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            post_type = body.get("post_type")
-            if post_type == "message" and body.get("message_type") == "private":
-                user_id = body.get("user_id")
-                text = str(body.get("raw_message") or body.get("message") or "").strip()
-                if user_id and text:
-                    await _qq_push({"type": "qq_message", "user_id": user_id, "text": text})
-                    logger.info("QQ event(ws): %s -> %s", user_id, text[:40])
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        logger.exception("QQ onebot ws error")
-
-
-@app.websocket("/api/qq/ws")
-async def qq_ws(ws: WebSocket) -> None:
-    """插件桥连接：桥接 → 插件(qq_message)，插件 → 桥接(reply → 发 QQ)。"""
-    global _qq_ws_conn
-    await ws.accept()
-    async with _qq_ws_lock:
-        old = _qq_ws_conn
-        _qq_ws_conn = ws
-    if old is not None:
-        try:
-            await old.close()
-        except Exception:
-            pass
-    try:
-        while True:
-            raw = await ws.receive_json()
-            if not isinstance(raw, dict):
-                continue
-            if raw.get("type") == "reply":
-                text = str(raw.get("text") or "").strip()
-                if text:
-                    qq = CONFIG.get("qq", {})
-                    if qq.get("enabled"):
-                        try:
-                            # 先发原始文本，再发 TTS 语音（复用 /api/qq/send 逻辑）
-                            resp_text = await qq_send(QQSendRequest(text=text, voice=False))
-                            resp_voice = await qq_send(QQSendRequest(text=text, voice=True))
-                            await ws.send_json({"type": "sent", "ok": True, "text": resp_text, "voice": resp_voice})
-                        except HTTPException as exc:
-                            await ws.send_json({"type": "sent", "ok": False, "detail": exc.detail})
-                    else:
-                        await ws.send_json({"type": "sent", "ok": False, "detail": "QQ push disabled"})
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        logger.exception("QQ ws error")
-    finally:
-        async with _qq_ws_lock:
-            if _qq_ws_conn is ws:
-                _qq_ws_conn = None
-
-
 # ── Silero VAD endpoint (barge-in detection) ──────────────────────────────
 #
 # The original speech-to-speech project runs VAD on the SERVER with silero-vad,
@@ -1249,100 +773,3 @@ async def vad_endpoint(ws: WebSocket) -> None:
             await ws.close()
         except Exception:
             pass
-
-
-# ── Companion backend lifecycle: start/stop the digital human + local LLM ──
-#
-# The DSH companion window calls these when it is shown/hidden: showing the
-# window starts LiveTalking (:8010) and llama-server (:8090), hiding it stops
-# them. Processes are spawned detached so they survive this bridge.
-
-LIVETALKING_DIR = REPO_ROOT.parent / "LiveTalking"
-LIVETALKING_PY = LIVETALKING_DIR / ".venv-lt" / "Scripts" / "python.exe"
-LLAMA_EXE = Path(r"E:\llama-cpp\llama-server.exe")
-LLAMA_MODEL = Path(r"E:\llama-cpp\models\Qwen3-4B-Q4_K_M.gguf")
-
-
-def _port_pid(port: int) -> int | None:
-    import psutil
-
-    for conn in psutil.net_connections(kind="tcp"):
-        if conn.laddr and conn.laddr.port == port and conn.status == "LISTEN":
-            return conn.pid
-    return None
-
-
-def _companion_env() -> dict:
-    env = dict(os.environ)
-    env["PATH"] = str(REPO_ROOT.parent / "ffmpeg") + os.pathsep + env.get("PATH", "")
-    scratch = REPO_ROOT / ".scratch"
-    env["TMP"] = str(scratch)
-    env["TEMP"] = str(scratch)
-    env["HF_HOME"] = str(scratch / "hf-home")
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
-
-
-def _spawn_detached(args: list[str], cwd: Path, log: str) -> None:
-    env = _companion_env()
-    log_file = (REPO_ROOT / ".scratch" / log).open("ab")
-    subprocess.Popen(
-        args,
-        cwd=str(cwd),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
-
-
-@app.post("/api/bridge/unload")
-async def bridge_unload() -> dict:
-    """Free the loaded STT/TTS models and CUDA cache (voice reading turned off).
-
-    The bridge process stays (it also serves skins/voices/media/companion
-    APIs); only the heavy models are released so RAM/VRAM drops back to the
-    light idle footprint. Models reload lazily on the next STT/TTS call."""
-    await models.unload()
-    return {"ok": True, "stt": models.stt_ready, "tts": models.tts_ready}
-
-
-@app.post("/api/companion/start")
-async def companion_start() -> dict:
-    """Start LiveTalking (:8010) and llama-server (:8090) if not running."""
-    started = []
-    if _port_pid(8010) is None and LIVETALKING_PY.is_file():
-        _spawn_detached(
-            [str(LIVETALKING_PY), "app.py", "--transport", "webrtc", "--model", "wav2lip", "--avatar_id", "wav2lip256_avatar1"],
-            LIVETALKING_DIR,
-            "livetalking.log",
-        )
-        started.append("livetalking")
-    if _port_pid(8090) is None and LLAMA_EXE.is_file() and LLAMA_MODEL.is_file():
-        _spawn_detached(
-            [str(LLAMA_EXE), "-m", str(LLAMA_MODEL), "-np", "1", "-c", "8192", "-fa", "on", "--temp", "1.0", "--host", "0.0.0.0", "--port", "8090"],
-            REPO_ROOT.parent,
-            "llama.log",
-        )
-        started.append("llama")
-    logger.info("companion start requested; started=%s", started)
-    return {"ok": True, "started": started}
-
-
-@app.post("/api/companion/stop")
-async def companion_stop() -> dict:
-    """Stop LiveTalking (:8010) and llama-server (:8090)."""
-    stopped = []
-    for port in (8010, 8090):
-        pid = _port_pid(port)
-        if pid is not None:
-            try:
-                import psutil
-
-                psutil.Process(pid).terminate()
-                stopped.append(port)
-            except Exception:  # noqa: BLE001 - best-effort stop
-                logger.exception("companion stop failed for port %s", port)
-    logger.info("companion stop requested; stopped=%s", stopped)
-    return {"ok": True, "stopped": stopped}

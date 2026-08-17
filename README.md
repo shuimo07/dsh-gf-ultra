@@ -1,128 +1,123 @@
 # DSH GF Ultra
 
-把 [dsh-voice-ai-girlfriend](https://github.com/beiyege-01/dsh-voice-ai-girlfriend) 升级成**全程本地、真口型同步**的 AI 女友全家桶。
+> ## 🚧 项目已太监（Abandoned）
+>
+> 本项目于 2026-08 正式停止开发。**数字人 / 真口型（LiveTalking + wav2lip）/ 本地大模型（llama.cpp + Qwen3-4B）部分已成废案**，
+> 相关代码保留在此仅作历史存档，不再维护、不再保证可用。
+>
+> 保留下来并实际在用的是其中的**语音模块**：给 [dsh-voice-ai-girlfriend](https://github.com/beiyege-01/dsh-voice-ai-girlfriend)
+> 的 DeepSeek Harness 语音插件做的一整套增强与修复（麦克风 STT、朗读 TTS、音色管理）。该模块在本仓库 `plugin/` + `bridge/` 中可独立使用。
+>
+> 已从使用环境（DSH Harness 插件）移除的功能：皮肤管理、女友窗、QQ 推送、排队/插话模式；对应桥接接口（`/api/skins*`、`/api/media/*`、`/api/qq/*`、`/api/companion/*`、`/api/bridge/unload`）已删除。
+> 开发过程中使用的皮肤素材（视频/图片）与音色素材（参考音频）打包在 `assets/` 下存档。
 
-- 🎙️ 语音对话（FunASR 中文识别 + Qwen3-TTS 音色克隆）
-- 👧 数字人皮肤系统（换装面板：视频/图片皮肤，一键切换、上传）
-- 🎵 音色管理系统（参考音频上传，多音色一键切换）
-- 👄 **实时口型同步**（LiveTalking + wav2lip256，嘴型跟语音走）
-- 🧠 本地大模型（llama.cpp + Qwen3-4B，断网可用，无需 API）
-- 🌐 整合网页：数字人 + 语音球，说一句答一句
+## 当前可用功能（语音模块）
+
+- 🎙️ 麦克风对话：浏览器录音 → 桥接 FunASR 中文识别（`/api/stt`）
+- 🔊 朗读回复：Qwen3-TTS 音色克隆 TTS（`/api/tts`），支持打断（服务端 silero VAD 抢话）
+- 🎵 音色管理：多音色列表 / 切换 / **重命名** / 删除（进回收站）/ 上传参考音频（.mp3 直接识别，.mp4 视频只取音轨，自动转 16k WAV）
+- 🛠️ 修复清单：女友窗隐藏后空白、新会话首条回复不朗读、emoji 导致 TTS 崩溃、朗读偶发卡死（45s 超时）
 
 > 所有组件跑在 **Windows 原生环境**（无需 WSL），存储全部在 E 盘。
 
-## 架构
+## 架构（语音模块）
 
 ```
-你的话 → 浏览器语音球 → 桥接 FunASR 识别(:8765)
-   → llama-server Qwen3-4B 思考(:8090, /no_think 关闭思考)
-   → LiveTalking edge_tts 合成 + wav2lip 实时口型(:8010)
-   → 数字人开口说话，嘴型与语音同步（WebRTC 视频流）
+你的话 → 浏览器语音球(麦克风) → 桥接 FunASR 识别(:8765) → DSH 大模型回复
+   → 桥接 Qwen3-TTS 克隆音色合成(:8765) → 浏览器播放 🔊朗读
+   → 播放中抢话由 /api/vad（silero VAD）实时检测，支持打断
 ```
 
 ```
-┌───────────── 浏览器 :8010/girlfriend.html ─────────────┐
-│  数字人视频(WebRTC) + 语音球 + 文字输入                  │
-└──────┬──────────────────────────────┬─────────────────┘
-       │ WebRTC(/offer /human)        │ HTTP (CORS)
-┌──────▼─────────────┐      ┌─────────▼──────────────────┐
-│ LiveTalking :8010  │      │ 桥接 :8765 (STT/TTS)        │
-│ wav2lip 口型       │      │ FunASR + Qwen3-TTS 音色克隆  │
-└────────────────────┘      └────────────────────────────┘
-┌────────────────────┐      ┌────────────────────────────┐
-│ llama-server :8090 │      │ DSH Web :3080 (插件 UI)      │
-│ Qwen3-4B 本地 LLM  │      │ ui-voice 皮肤/音色/朗读插件   │
-└────────────────────┘      └────────────────────────────┘
+┌───────────── 浏览器 DSH Web :3080 ──────────────┐
+│  ui-voice 插件：🎙️麦克风 🔊朗读 🎵音色管理       │
+└──────────────────────┬──────────────────────────┘
+                       │ HTTP / WebSocket
+┌──────────────────────▼──────────────────────────┐
+│ 语音桥接 :8765 (FastAPI)                         │
+│  FunASR 中文 STT + Qwen3-TTS 音色克隆 + VAD 抢话  │
+│  /api/stt /api/tts /api/vad /api/voices*        │
+└─────────────────────────────────────────────────┘
 ```
 
-## 已实现功能清单
+## 历史（废案部分，仅存档）
 
 | 功能 | 说明 | 状态 |
 |---|---|---|
-| DSH 语音插件（ui-voice） | 麦克风/朗读/插话开关 + 修复隐藏窗口空白 bug + 修复新会话首条回复不朗读 bug | ✅ |
-| 皮肤管理 | 🎨 面板：新建/**重命名**/删除（回收站）/切换/上传（.mp4 视频 + .jpg 图片待机、视频说话动画），15s 自动刷新 | ✅ |
-| 音色管理 | 🎵 面板：多音色列表/切换/**重命名**/删除（回收站）/上传参考音频（.mp3 直接识别，.mp4 视频只取音轨，自动转 16k WAV） | ✅ |
-| 口型同步 | LiveTalking wav2lip256：infer ~48fps / final ~25fps（实时），录制 MP4 验证通过 | ✅ |
-| 本地大模型 | llama.cpp + Qwen3-4B-Q4_K_M（2.5GB），`/no_think` 关闭思考，本地回复 | ✅ |
-| 整合网页 | `girlfriend.html`：数字人 + 语音球 + 文字输入，说一句答一句 | ✅ |
-| 一键启动 | `start-girlfriend.cmd` 双击拉起全部服务 | ✅ |
+| 数字人 + 真口型 | LiveTalking + wav2lip256（WebRTC 视频流） | ❌ 废案 |
+| 本地大模型 | llama.cpp + Qwen3-4B-Q4_K_M（:8090） | ❌ 废案 |
+| 皮肤管理 | 视频/图片皮肤切换、上传 | ❌ 已移除 |
+| 女友窗 | 显示/隐藏联动启停 LiveTalking + llama | ❌ 已移除 |
+| QQ 推送 | NapCat OneBot 双向桥 | ❌ 已移除 |
+| 排队/插话模式 | 插件 BusyToggle | ❌ 已移除 |
 
-## 一键开关矩阵（服务按需启停，不占资源）
+废案相关源码：`web/`（数字人整合页）、`patches/`（LiveTalking/TTS Windows 补丁）、`docs/03`、`docs/04`。
+
+## 当前可用功能清单
+
+| 功能 | 说明 | 状态 |
+|---|---|---|
+| DSH 语音插件（ui-voice） | 麦克风/朗读/音色管理 + 全部 bug 修复 | ✅ |
+| 音色管理 | 列表/切换/重命名/删除（回收站）/上传（.mp3 直接识别，.mp4 取音轨转 16k WAV） | ✅ |
+| 语音桥接 | `/api/stt` `/api/tts` `/api/vad` `/api/voices*` `/api/health` | ✅ |
+
+## 一键开关（语音模块）
 
 | 你的操作 | 自动触发 |
 |---|---|
-| 🎬 **显示女友窗** | 自动启动 **LiveTalking**（:8010 数字人口型）+ **llama-server**（:8090 本地大模型） |
-| 🎬 **隐藏女友窗** | 自动关闭 LiveTalking + llama-server（释放显存） |
-| 🔊 **关闭语音朗读** | 自动卸载 FunASR + 克隆音色 TTS 模型（释放 ~4GB 显存/运存，桥接 `/api/bridge/unload`） |
-| 🔊 **开启语音朗读** | 模型按需自动重新加载（首次朗读等几秒） |
-
-> 语音桥接进程（:8765，轻量 ~250MB）保持常驻——它同时承载皮肤/音色管理、素材服务与上述一键启停接口；真正吃资源的是模型（~4GB），关朗读即卸载。
+| 🔊 开启朗读 | 桥接按需加载 FunASR + TTS 模型（首次等几秒） |
+| 🔊 关闭朗读 | 桥接进程整体停止（进程级启停，不占显存） |
 
 ## 存储位置（全部在 E 盘）
 
 | 内容 | 位置 |
 |---|---|
 | 项目代码 / 插件 / 脚本 | `E:\AI\dsh-voice-ai-girlfriend`、`E:\AI\dsh-gf-ultra`（本仓库） |
-| LiveTalking（口型） | `E:\AI\LiveTalking`（venv 自带） |
-| 本地大模型 | `E:\llama-cpp`（llama-server + `models\Qwen3-4B-Q4_K_M.gguf` 2.5GB） |
-| ffmpeg | `E:\AI\ffmpeg` |
-| 皮肤 / 音色素材 | `E:\AI\dsh-voice-ai-girlfriend\assets\skins`、`assets\voices` |
-| 模型权重（wav2lip 等） | `E:\AI\LiveTalking\models`、`data\avatars` |
+| 皮肤 / 音色素材（已存档） | 本仓库 `assets\skins`、`assets\voices` |
+| STT/TTS 模型权重 | `E:\AI\dsh-voice-ai-girlfriend\models`、`Qwen3-TTS-12Hz-1.7B-Base` |
 | 临时 / 缓存 | `E:\AI\dsh-voice-ai-girlfriend\.scratch` |
 
-> C 盘仅写入 DSH 插件本体（`~/.dsh/profiles/web/node_modules`，约 300KB）及少量系统缓存，无大文件。
-
-## 快速开始
+## 快速开始（语音模块）
 
 ```powershell
-# 一键启动（LLM + 口型 + 语音桥接）
-E:\AI\dsh-voice-ai-girlfriend\start-girlfriend.cmd
+# 1. 安装依赖并下载模型（首次）
+E:\AI\dsh-voice-ai-girlfriend\setup-deps.ps1
+E:\AI\dsh-voice-ai-girlfriend\setup-models.ps1
 
-# 浏览器打开
-http://127.0.0.1:8010/girlfriend.html
-#   1. 点「连接数字人」等待出画
-#   2. 点语音球说话 / 底部输入框打字
-#   3. 数字人开口回答，嘴型跟语音同步
+# 2. 启动语音桥接（:8765）
+E:\AI\dsh-voice-ai-girlfriend\bridge\start-bridge.cmd
+
+# 3. 启动 DSH Web（:3080），插件里开麦克风/朗读即可
+http://127.0.0.1:3080
 ```
-
-其它入口：
-
-| 地址 | 用途 |
-|---|---|
-| `:8010/girlfriend.html` | 数字人 + 语音球整合页 |
-| `:8010/index.html` | LiveTalking 官方测试页 |
-| `:8010/avatar.html` | 上传视频生成个人数字人形象 |
-| `:3080` | DSH Web（插件 UI：🎨皮肤 🎵音色 🔊朗读 🎙️麦克风） |
-| `:8765/api/health` | 语音桥接健康检查 |
 
 ## 目录结构
 
 ```
 dsh-gf-ultra/
-├── plugin/        # 增强版 ui-voice 插件源码（皮肤/音色管理 + 修复）
-├── bridge/        # 增强版语音桥接（skins/voices API）
-├── web/           # 整合页（数字人 + 语音球）
+├── plugin/        # ui-voice 插件源码（语音模块，含全部修复）
+├── bridge/        # 语音桥接（STT / TTS / VAD / 音色管理 API）
+├── assets/        # 📦 开发期使用的皮肤（视频/图片）+ 音色（参考音频）存档
+├── web/           # 🗄️ 废案：数字人整合页（仅存档）
 ├── scripts/       # 一键启动 / 重启 / 停止脚本
-├── patches/       # LiveTalking / TTS 的 Windows 修复补丁
+├── patches/       # 🗄️ 废案：LiveTalking / TTS 的 Windows 修复补丁（仅存档）
 ├── config/        # 配置模板
-└── docs/          # 详细部署文档
+└── docs/          # 部署文档（01/02 语音模块；03/04 废案存档）
 ```
 
 ## 部署文档
 
 - [01 - 语音桥接与 DSH 插件](docs/01-语音桥接与DSH插件.md)
-- [02 - 皮肤与音色管理](docs/02-皮肤与音色管理.md)
-- [03 - LiveTalking 口型同步（Windows）](docs/03-LiveTalking口型同步.md)
-- [04 - 本地大模型与整合页面](docs/04-本地大模型与整合页面.md)
+- [02 - 皮肤与音色管理](docs/02-皮肤与音色管理.md)（皮肤部分已废案，音色部分仍有效）
+- [03 - LiveTalking 口型同步（Windows）](docs/03-LiveTalking口型同步.md)（🗄️ 废案存档）
+- [04 - 本地大模型与整合页面](docs/04-本地大模型与整合页面.md)（🗄️ 废案存档）
 
 ## 硬件要求
 
-- NVIDIA 显卡 8GB 显存（本项目：RTX 4060 Laptop 8GB 实测通过）
-- 磁盘：模型与依赖约 15GB（E 盘）
+- NVIDIA 显卡 8GB 显存（本项目：RTX 4060 Laptop 8GB 实测通过，语音模块满载 ~4GB）
+- 磁盘：模型与依赖约 8GB（E 盘）
 
 ## 致谢与许可
 
 - 语音桥接/插件：基于 [beiyege-01/dsh-voice-ai-girlfriend](https://github.com/beiyege-01/dsh-voice-ai-girlfriend)（Apache-2.0）增强
-- 口型同步：[lipku/LiveTalking](https://github.com/lipku/LiveTalking)（Apache-2.0）+ wav2lip256
-- 部署思路参考：零度解说《AI 赛博女友》本地部署教程
-- 大模型：Qwen3-4B（Qwen，Apache-2.0 / Qwen License）
+- 废案部分部署思路参考：零度解说《AI 赛博女友》本地部署教程

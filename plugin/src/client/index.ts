@@ -3,7 +3,10 @@
  *
  * T5: capture (embedded mic-capture worklet) + silence endpointing ->
  * bridge /api/stt -> conversation.send(text). T6 adds reply TTS playback;
- * T7 the toggles; T8 the companion animation window.
+ * T7 the toggles; plus the voice (timbre) manager.
+ *
+ * NOTE: the digital-human / skin / companion / QQ-push / busy-toggle features
+ * were removed when the companion project was abandoned (see repo README).
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
@@ -11,20 +14,11 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: pulls ui-conversation's SlotMap merge so PropsRuntime resolves.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { MicButton } from './MicButton.tsx'
-import { BusyToggle } from './BusyToggle.tsx'
-import { QqPushToggle } from './QqPushToggle.tsx'
 import { BridgeStatus } from './BridgeStatus.tsx'
 import { ReplySpeakerMount } from './voice/reply-listener.tsx'
-import { QQBridge } from './voice/qq-bridge.tsx'
 import { ReplySpeaker } from './voice/speaker.ts'
 import { VoiceToggle } from './VoiceToggle.tsx'
-import { CompanionToggle } from './CompanionToggle.tsx'
-import { CompanionWindow } from './voice/companion.tsx'
-import { SkinPicker } from './SkinPicker.tsx'
 import { VoiceManager } from './VoiceManager.tsx'
-import { CompanionController } from './voice/companion-controller.ts'
-import { LiveTalkingClient } from './voice/livetalking.ts'
-import { SkinController } from './voice/skin-controller.ts'
 import { bridgeBase } from './bridge.ts'
 import type { VoiceInjected } from './contract.ts'
 import { en, zh, type VoiceKey } from './locales.ts'
@@ -55,20 +49,9 @@ export function apply(ctx: ClientContext): void {
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-voice: dictionaries')
 
-  // One shared speaker per plugin fiber: the reply listener plays through it
-  // and the companion window reads its `speaking` state.
+  // One shared speaker per plugin fiber: the reply listener plays through it.
   const speaker = new ReplySpeaker()
   ctx.effect(() => () => speaker.dispose(), 'ui-voice: speaker teardown')
-
-  // One shared companion controller: the window renders it, the toggle flips it.
-  const companion = new CompanionController()
-
-  // One shared skin controller: the skin picker bumps it, the window reloads.
-  const skinController = new SkinController()
-
-  // One shared LiveTalking client: the companion window connects and renders
-  // the real-time digital human; the reply listener feeds it TTS audio.
-  const livetalking = new LiveTalkingClient()
 
   // One shared TTS abort holder: the reply listener registers its current
   // AbortController; the voice toggle aborts it when turned off so the bridge
@@ -88,25 +71,14 @@ export function apply(ctx: ClientContext): void {
       // running (my reply streaming), a plain queue would sit as a pending
       // item in the input dock, needing a manual send — the "second sentence
       // stuck" bug. Default: steer, which interrupts the running turn.
-      // The BusyToggle flips this to pure queue for continuous conversation
-      // (let the current turn finish, then the sentence auto-sends).
       const running = session.getSnapshot()?.running === true
-      let interrupt = true
-      try {
-        interrupt = localStorage.getItem('s2s.voice.interrupt') !== '0'
-      } catch {
-        // persistence unavailable — fall back to the interrupt default
-      }
-      const mode = running && interrupt ? 'steer' : 'queue'
+      const mode = running ? 'steer' : 'queue'
       const result = await session.prompt([{ type: 'text', text }], mode)
       if (!result.ok) {
         throw new Error(`[ui-voice] prompt failed: ${result.error.code}: ${result.error.message}`)
       }
     },
     speaker,
-    companion,
-    skinController,
-    livetalking,
     abortTts: () => {
       activeTtsController?.abort()
       activeTtsController = null
@@ -167,33 +139,8 @@ export function apply(ctx: ClientContext): void {
     VoiceToggle,
   ))
 
-  // Companion-window visibility toggle (s2s.voice.companion).
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
-    {
-      name: 'conversation.input.left',
-      id: 'voice-companion-toggle',
-      order: 86,
-      locale: NS,
-      inject: injectFace,
-    },
-    CompanionToggle,
-  ))
-
-  // Skin manager: toolbar seat that opens the skin picker panel (list /
-  // switch / upload companion videos).
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
-    {
-      name: 'conversation.input.left',
-      id: 'voice-skin-picker',
-      order: 88,
-      locale: NS,
-      inject: injectFace,
-    },
-    SkinPicker,
-  ))
-
   // Voice manager: toolbar seat that opens the timbre panel (list / switch /
-  // upload reference audio for TTS voice cloning).
+  // rename / delete / upload reference audio for TTS voice cloning).
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
     {
       name: 'conversation.input.left',
@@ -203,31 +150,6 @@ export function apply(ctx: ClientContext): void {
       inject: injectFace,
     },
     VoiceManager,
-  ))
-
-  // QQ reply-push toggle (s2s.voice.qqPush): ON = replies auto-pushed to QQ.
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
-    {
-      name: 'conversation.input.left',
-      id: 'voice-qqpush-toggle',
-      order: 84,
-      locale: NS,
-      inject: injectFace,
-    },
-    QqPushToggle,
-  ))
-
-  // Busy-delivery toggle (s2s.voice.interrupt): steer the running turn
-  // (interrupt, default) or queue behind it (continuous conversation).
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
-    {
-      name: 'conversation.input.left',
-      id: 'voice-busy-toggle',
-      order: 87,
-      locale: NS,
-      inject: injectFace,
-    },
-    BusyToggle,
   ))
 
   // Hidden per-session reply listener: speaks finalized assistant text.
@@ -240,30 +162,5 @@ export function apply(ctx: ClientContext): void {
       inject: injectFace,
     },
     ReplySpeakerMount,
-  ))
-
-  // Full-height companion animation window (idle bg-images / speaking task-videos).
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
-    {
-      name: 'conversation.input.left',
-      id: 'voice-companion',
-      order: 95,
-      locale: NS,
-      inject: injectFace,
-    },
-    CompanionWindow,
-  ))
-
-  // Hidden QQ bridge: private-message inbound -> sendText; settled replies ->
-  // bridge -> TTS voice -> QQ. Renders null; no-op when qq disabled.
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
-    {
-      name: 'conversation.input.left',
-      id: 'voice-qq-bridge',
-      order: 96,
-      locale: NS,
-      inject: injectFace,
-    },
-    QQBridge,
   ))
 }
