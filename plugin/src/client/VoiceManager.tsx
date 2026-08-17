@@ -117,6 +117,24 @@ export const VoiceManager = memo(function VoiceManager({ t }: VoiceManagerProps)
     [voices, active],
   )
 
+  const deleteVoice = useCallback(
+    async (name: string) => {
+      if (!window.confirm(`${t('voice.deleteConfirm')}「${name}」？`)) return
+      try {
+        const data = await fetch(`${bridgeBase()}/api/voices/delete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }).then((r) => r.json() as Promise<VoicesResponse>)
+        setVoices(data.voices ?? voices)
+        setActive(data.active ?? active)
+      } catch (err) {
+        console.error('[ui-voice] delete voice failed:', err)
+      }
+    },
+    [voices, active],
+  )
+
   const onUpload = useCallback(async () => {
     if (selectedFile === null) return
     const name = newName.trim()
@@ -196,6 +214,15 @@ export const VoiceManager = memo(function VoiceManager({ t }: VoiceManagerProps)
                       onClick={() => void renameVoice(entry.name)}
                     >
                       ✏️
+                    </button>
+                    <button
+                      type="button"
+                      className={css.renameBtn}
+                      title={t('voice.delete')}
+                      aria-label={t('voice.delete')}
+                      onClick={() => void deleteVoice(entry.name)}
+                    >
+                      🗑️
                     </button>
                   </li>
                 )

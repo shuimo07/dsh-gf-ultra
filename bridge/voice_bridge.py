@@ -526,6 +526,40 @@ class SkinRenameRequest(BaseModel):
     new: str
 
 
+class SkinDeleteRequest(BaseModel):
+    name: str
+
+
+def _send_to_recycle_bin(path: str) -> None:
+    """Move a file/folder to the Windows Recycle Bin (undo-able) via SHFileOperationW."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("wFunc", wintypes.UINT),
+            ("pFrom", wintypes.LPCWSTR),
+            ("pTo", wintypes.LPCWSTR),
+            ("fFlags", ctypes.c_ushort),
+            ("fAnyOperationsAborted", wintypes.BOOL),
+            ("hNameMappings", wintypes.LPVOID),
+            ("lpszProgressTitle", wintypes.LPCWSTR),
+        ]
+
+    FO_DELETE = 3
+    FOF_ALLOWUNDO = 0x40  # recycle bin (undo-able)
+    FOF_NOCONFIRMATION = 0x10
+    FOF_SILENT = 0x04
+    shf = SHFILEOPSTRUCTW()
+    shf.wFunc = FO_DELETE
+    shf.pFrom = str(path) + "\0\0"  # double-null terminated
+    shf.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(shf))
+    if result != 0:
+        raise OSError(f"recycle bin operation failed with code {result}")
+
+
 def _validate_item_name(name: str) -> str:
     cleaned = Path(name).name.strip()
     if not cleaned or cleaned.startswith(".") or "/" in cleaned or "\\" in cleaned or ".." in cleaned:
@@ -551,6 +585,28 @@ async def skins_rename(req: SkinRenameRequest) -> dict:
     if _read_active_skin() == old:
         SKINS_STATE.write_text(json.dumps({"active": new}, ensure_ascii=False), encoding="utf-8")
     logger.info("skin %s -> %s", old, new)
+    return {"skins": _skins_payload(), "active": _read_active_skin()}
+
+
+@app.post("/api/skins/delete")
+async def skins_delete(req: SkinDeleteRequest) -> dict:
+    """Delete a skin folder into the Windows Recycle Bin (undo-able)."""
+    name = _validate_item_name(req.name)
+    target = SKINS_ROOT / name
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail=f"skin not found: {name}")
+    was_active = _read_active_skin() == name
+    try:
+        _send_to_recycle_bin(target)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"recycle bin failed: {exc}") from exc
+    remaining = _list_skins()
+    if was_active:
+        if remaining:
+            SKINS_STATE.write_text(json.dumps({"active": remaining[0]}, ensure_ascii=False), encoding="utf-8")
+        else:
+            SKINS_STATE.unlink(missing_ok=True)
+    logger.info("skin %s deleted (recycle bin)", name)
     return {"skins": _skins_payload(), "active": _read_active_skin()}
 
 
@@ -756,6 +812,32 @@ async def voices_rename(req: VoiceRenameRequest) -> dict:
     if _active_voice() == old:
         VOICES_STATE.write_text(json.dumps({"active": new}, ensure_ascii=False), encoding="utf-8")
     logger.info("voice %s -> %s", old, new)
+    return {"voices": voices_list_payload(), "active": _active_voice()}
+
+
+class VoiceDeleteRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/voices/delete")
+async def voices_delete(req: VoiceDeleteRequest) -> dict:
+    """Delete a voice folder into the Windows Recycle Bin (undo-able)."""
+    name = _validate_item_name(req.name)
+    target = VOICES_ROOT / name
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail=f"voice not found: {name}")
+    was_active = _active_voice() == name
+    try:
+        _send_to_recycle_bin(target)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"recycle bin failed: {exc}") from exc
+    remaining = _list_voices()
+    if was_active:
+        if remaining:
+            VOICES_STATE.write_text(json.dumps({"active": remaining[0]}, ensure_ascii=False), encoding="utf-8")
+        else:
+            VOICES_STATE.unlink(missing_ok=True)
+    logger.info("voice %s deleted (recycle bin)", name)
     return {"voices": voices_list_payload(), "active": _active_voice()}
 
 

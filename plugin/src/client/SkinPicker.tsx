@@ -134,6 +134,25 @@ export const SkinPicker = memo(function SkinPicker({ t, skinController }: SkinPi
     [skins, active, skinController],
   )
 
+  const deleteSkin = useCallback(
+    async (name: string) => {
+      if (!window.confirm(`${t('skin.deleteConfirm')}「${name}」？`)) return
+      try {
+        const data = await fetch(`${bridgeBase()}/api/skins/delete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }).then((r) => r.json() as Promise<SkinsResponse>)
+        setSkins(data.skins ?? skins)
+        setActive(data.active ?? active)
+        skinController.bump()
+      } catch (err) {
+        console.error('[ui-voice] delete skin failed:', err)
+      }
+    },
+    [skins, active, skinController],
+  )
+
   const pickFile = useCallback((slot: 'bg' | 'talk') => {
     pendingSlotRef.current = slot
     fileRef.current?.click()
@@ -215,6 +234,15 @@ export const SkinPicker = memo(function SkinPicker({ t, skinController }: SkinPi
                       onClick={() => void renameSkin(entry.name)}
                     >
                       ✏️
+                    </button>
+                    <button
+                      type="button"
+                      className={css.renameBtn}
+                      title={t('skin.delete')}
+                      aria-label={t('skin.delete')}
+                      onClick={() => void deleteSkin(entry.name)}
+                    >
+                      🗑️
                     </button>
                   </li>
                 )
