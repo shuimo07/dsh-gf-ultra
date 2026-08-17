@@ -61,3 +61,4 @@ tsdown --config tsdown.config.ts                        # lib/index.js + lib/cli
 - **隐藏女友窗后点不回来**：隐藏时 `<video>` 元素被卸载，重新显示时设置视频源的 effect 依赖里没有 `visible`，不会重跑 → 视频空白。修复：effect 依赖加入 `visible`。
 - **新会话首条回复不朗读**：历史基线判定把新会话第一条 settled 回复当历史吞掉。修复：记录流式 `running` 锚点 + 挂载 1.5s 无历史则冻结基线为 0。
 - **回复含 emoji 时 TTS 崩溃（500）**：qwen3_tts_handler 控制台打印 emoji 在 GBK 下崩溃。修复见 `patches/qwen3-tts-emoji-print.patch`。
+- **偶尔整条不朗读**：TTS 请求无超时，若某句 `/api/tts` 卡住（音色切换后模型重载 / 显存紧张 / GPU 被 LLM·数字人抢占），串行朗读链会一直等待，当前与后续回复全部不读。修复：客户端 TTS 请求加 45s 硬超时（超时跳过该句、链继续），并区分超时/失败日志；另为自动播放策略导致 AudioContext 挂起的情况加了诊断提示。
