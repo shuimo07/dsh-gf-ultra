@@ -1,8 +1,8 @@
 /**
  * BridgeStatus: composer tool-row indicator that the voice bridge is
  * reachable. When the bridge is DOWN, a warning button appears; clicking it
- * opens the companion repo's deploy guide (this plugin alone is a hollow UI
- * — voice/QQ features need the local bridge + NapCat from the main repo).
+ * opens the upstream repo's deploy guide (this plugin alone is a hollow UI —
+ * the voice features need the local bridge from the main repo).
  *
  * Hidden entirely while the bridge is up (or while checking).
  */
@@ -14,7 +14,7 @@ import { bridgeBase } from './bridge.ts'
 import type { VoiceInjected } from './contract.ts'
 import css from './BridgeStatus.module.css'
 
-/** URL of the companion repo with the full deploy guide. */
+/** URL of the upstream repo with the full deploy guide. */
 const MAIN_REPO_URL = 'https://github.com/beiyege-01/dsh-voice-ai-girlfriend#readme'
 
 /** Full props: framework runtime share + `voice` locale seat + injected face. */
@@ -69,7 +69,7 @@ export const BridgeStatus = memo(function BridgeStatus(_props: BridgeStatusProps
     <button
       type="button"
       className={css.warn}
-      title="未检测到 voice bridge —— 语音/QQ 功能不可用。点按查看部署指南"
+      title="未检测到 voice bridge —— 语音功能不可用。点按查看部署指南"
       aria-label="未检测到 voice bridge —— 点按查看部署指南"
       onClick={() => window.open(MAIN_REPO_URL, '_blank', 'noopener')}
     >
