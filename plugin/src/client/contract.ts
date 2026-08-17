@@ -6,7 +6,9 @@
  */
 
 import type { CompanionController } from './voice/companion-controller.ts'
+import type { LiveTalkingClient } from './voice/livetalking.ts'
 import type { ReplySpeaker } from './voice/speaker.ts'
+import type { SkinController } from './voice/skin-controller.ts'
 
 /** Injected behavior face the voice components receive from the plugin apply. */
 export interface VoiceInjected {
@@ -21,6 +23,10 @@ export interface VoiceInjected {
   speaker: ReplySpeaker
   /** Shared companion-window visibility (rendered by the window, flipped by the toggle). */
   companion: CompanionController
+  /** Shared skin-change signal (bumped by the skin picker, watched by the window). */
+  skinController: SkinController
+  /** LiveTalking real-time digital human (lip-sync); null/disabled when absent. */
+  livetalking: LiveTalkingClient
   /**
    * Abort any TTS request currently in flight (the reply listener registers
    * its AbortController here; the voice toggle calls this when turned off so

@@ -64,6 +64,27 @@
   transition: background 0.2s ease;
 }
 
+/* Digital-human / skin mode toggle (top-right of the column). */
+.dhToggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  pointer-events: auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l3, rgba(0, 0, 0, 0.15));
+  background: var(--dsw-alias-bg-overlay, rgba(255, 255, 255, 0.85));
+  cursor: pointer;
+  font-size: 15px;
+  opacity: 0.85;
+}
+
+.dhToggle:hover {
+  opacity: 1;
+}
+
 .companion.left .handle {
   left: auto;
   right: 0;

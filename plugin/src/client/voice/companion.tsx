@@ -51,23 +51,69 @@ export type CompanionWindowProps =
 /**
  * @param props - framework runtime + locale + injected speaker face.
  */
-export const CompanionWindow = memo(function CompanionWindow({ speaker, companion }: CompanionWindowProps) {
+export const CompanionWindow = memo(function CompanionWindow({ speaker, companion, skinController, livetalking }: CompanionWindowProps) {
   const [visible, setVisible] = useState<boolean>(companion.visible)
   const [widthVw, setWidthVw] = useState<number>(readWidth)
   const [side, setSide] = useState<'left' | 'right'>(readSide)
   const [speaking, setSpeaking] = useState<boolean>(speaker.speaking)
-  const [bgVideos, setBgVideos] = useState<string[]>([])
+  const [bgMedia, setBgMedia] = useState<{ url: string; type: 'video' | 'image' }[]>([])
   const [taskVideos, setTaskVideos] = useState<string[]>([])
   const [bgIndex, setBgIndex] = useState(0)
   const [taskIndex, setTaskIndex] = useState(0)
+  const [mediaTick, setMediaTick] = useState(0)
+  const [dhStream, setDhStream] = useState<MediaStream | null>(null)
+  // Digital-human mode: show the LiveTalking real-time video when connected;
+  // the pre-recorded skins stay available via the toggle (persisted).
+  const [dhMode, setDhMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('s2s.voice.livetalkingMode') !== '0'
+    } catch {
+      return true
+    }
+  })
   const idleRef = useRef<HTMLVideoElement | null>(null)
   const speakRef = useRef<HTMLVideoElement | null>(null)
+  const dhRef = useRef<HTMLVideoElement | null>(null)
   const dragRef = useRef<{ startX: number; startWidth: number; current: number } | null>(null)
 
   // Follow the shared companion visibility (the toggle flips it live).
   useEffect(() => {
     return companion.subscribe(() => setVisible(companion.visible))
   }, [companion])
+
+  // Connect the real-time digital human and follow its stream.
+  useEffect(() => {
+    const unsub = livetalking.subscribe(() => {
+      setDhStream(livetalking.videoStream)
+      setDhMode((mode) => mode || livetalking.connected)
+    })
+    void livetalking.connect()
+    return unsub
+  }, [livetalking])
+
+  // Attach the DH stream to the video element when it appears.
+  useEffect(() => {
+    const vid = dhRef.current
+    if (vid === null) return
+    vid.srcObject = dhStream
+  }, [dhStream])
+
+  const toggleDhMode = useCallback(() => {
+    setDhMode((previous) => {
+      const next = !previous
+      try {
+        localStorage.setItem('s2s.voice.livetalkingMode', next ? '1' : '0')
+      } catch {
+        // persistence unavailable — state still flips for this session
+      }
+      return next
+    })
+  }, [])
+
+  // Reload media immediately when the skin picker switches skins/uploads.
+  useEffect(() => {
+    return skinController.subscribe(() => setMediaTick((t) => t + 1))
+  }, [skinController])
 
   // Load media lists from the bridge on mount, then re-poll every 30 s so
   // videos dropped into the folders are picked up without a page refresh.
@@ -87,7 +133,10 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
         const json = JSON.stringify([bg.media, task.videos])
         if (json === mediaJsonRef.current) return
         mediaJsonRef.current = json
-        setBgVideos(bg.media.filter((m) => m.type === 'video').map((m) => `${base}/media/bg-images/${encodeURIComponent(m.name)}`))
+        setBgMedia(bg.media.map((m) => ({
+          url: `${base}/media/bg-images/${encodeURIComponent(m.name)}`,
+          type: m.type === 'image' ? 'image' : 'video',
+        })))
         setTaskVideos(task.videos.map((name) => `${base}/media/task-videos/${encodeURIComponent(name)}`))
       } catch (err) {
         console.error('[ui-voice] companion media list failed:', err)
@@ -99,24 +148,33 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [])
+  }, [mediaTick])
 
   // Follow the speaker's speaking state.
   useEffect(() => {
     return speaker.subscribe(() => setSpeaking(speaker.speaking))
   }, [speaker])
 
-  // Idle layer: play bgVideos[bgIndex]; advance on ended. `visible` is a
-  // dependency because hiding unmounts the <video> element; on re-show the
-  // effect must re-run to (re)attach the source, otherwise the window comes
-  // back blank.
+  // Idle layer (video): play bgMedia[bgIndex] when it is a video; advance on
+  // ended. `visible` is a dependency because hiding unmounts the <video>
+  // element; on re-show the effect must re-run to (re)attach the source,
+  // otherwise the window comes back blank.
   useEffect(() => {
     const vid = idleRef.current
-    const src = bgVideos[bgIndex % bgVideos.length]
-    if (!visible || vid === null || src === undefined) return
-    vid.src = src
+    const item = bgMedia[bgIndex % bgMedia.length]
+    if (!visible || item === undefined || item.type !== 'video' || vid === null) return
+    vid.src = item.url
     void vid.play().catch(() => {})
-  }, [bgIndex, bgVideos, visible])
+  }, [bgIndex, bgMedia, visible])
+
+  // Idle layer (image): static images have no `ended` event — advance on a
+  // timer instead (only while visible and not speaking).
+  useEffect(() => {
+    const item = bgMedia[bgIndex % bgMedia.length]
+    if (!visible || item === undefined || item.type !== 'image' || speaking || bgMedia.length < 2) return
+    const timer = window.setTimeout(() => setBgIndex((i) => (i + 1) % bgMedia.length), 10000)
+    return () => window.clearTimeout(timer)
+  }, [bgIndex, bgMedia, visible, speaking])
 
   // Rotate the speaking clip once per new reply (each speaking start).
   const wasSpeakingRef = useRef(false)
@@ -144,8 +202,8 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
   }, [speaking, taskIndex, taskVideos, visible])
 
   const onIdleEnded = useCallback(() => {
-    if (bgVideos.length > 1) setBgIndex((i) => (i + 1) % bgVideos.length)
-  }, [bgVideos.length])
+    if (bgMedia.length > 1) setBgIndex((i) => (i + 1) % bgMedia.length)
+  }, [bgMedia.length])
 
   const onSpeakEnded = useCallback(() => {
     // Keep looping the speaking clip while the reply is still playing.
@@ -195,7 +253,11 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
     })
   }, [])
 
-  if (!visible || (bgVideos.length === 0 && taskVideos.length === 0)) return null
+  if (!visible) return null
+  if (!dhMode && bgMedia.length === 0 && taskVideos.length === 0) return null
+
+  const idleItem = bgMedia[bgIndex % bgMedia.length]
+  const idleIsVideo = idleItem !== undefined && idleItem.type === 'video'
 
   return (
     <div
@@ -203,12 +265,26 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
       style={{ width: `${widthVw}vw`, right: side === 'right' ? 0 : undefined, left: side === 'left' ? 0 : undefined }}
       aria-hidden="true"
     >
-      {bgVideos.length > 0 && (
+      {dhMode && dhStream !== null && (
+        <video ref={dhRef} className={css.video} muted autoPlay playsInline />
+      )}
+      {!dhMode && bgMedia.length > 0 && idleIsVideo && (
         <video ref={idleRef} className={speaking ? `${css.video} ${css.hidden}` : css.video} muted playsInline preload="auto" onEnded={onIdleEnded} />
       )}
-      {taskVideos.length > 0 && (
+      {!dhMode && bgMedia.length > 0 && idleItem !== undefined && !idleIsVideo && (
+        <img src={idleItem.url} className={speaking ? `${css.video} ${css.hidden}` : css.video} alt="" draggable={false} />
+      )}
+      {!dhMode && taskVideos.length > 0 && (
         <video ref={speakRef} className={speaking ? css.video : `${css.video} ${css.hidden}`} muted playsInline preload="auto" onEnded={onSpeakEnded} />
       )}
+      <button
+        type="button"
+        className={css.dhToggle}
+        title={dhMode ? '数字人模式（点击切回皮肤）' : '皮肤模式（点击切换数字人）'}
+        onClick={toggleDhMode}
+      >
+        {dhMode ? '🤖' : '🎨'}
+      </button>
       <div
         className={css.handle}
         onPointerDown={(event) => {

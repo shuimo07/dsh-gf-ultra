@@ -20,7 +20,11 @@ import { ReplySpeaker } from './voice/speaker.ts'
 import { VoiceToggle } from './VoiceToggle.tsx'
 import { CompanionToggle } from './CompanionToggle.tsx'
 import { CompanionWindow } from './voice/companion.tsx'
+import { SkinPicker } from './SkinPicker.tsx'
+import { VoiceManager } from './VoiceManager.tsx'
 import { CompanionController } from './voice/companion-controller.ts'
+import { LiveTalkingClient } from './voice/livetalking.ts'
+import { SkinController } from './voice/skin-controller.ts'
 import { bridgeBase } from './bridge.ts'
 import type { VoiceInjected } from './contract.ts'
 import { en, zh, type VoiceKey } from './locales.ts'
@@ -59,6 +63,13 @@ export function apply(ctx: ClientContext): void {
   // One shared companion controller: the window renders it, the toggle flips it.
   const companion = new CompanionController()
 
+  // One shared skin controller: the skin picker bumps it, the window reloads.
+  const skinController = new SkinController()
+
+  // One shared LiveTalking client: the companion window connects and renders
+  // the real-time digital human; the reply listener feeds it TTS audio.
+  const livetalking = new LiveTalkingClient()
+
   // One shared TTS abort holder: the reply listener registers its current
   // AbortController; the voice toggle aborts it when turned off so the bridge
   // stops synthesizing (client disconnect) instead of draining its queue.
@@ -94,6 +105,8 @@ export function apply(ctx: ClientContext): void {
     },
     speaker,
     companion,
+    skinController,
+    livetalking,
     abortTts: () => {
       activeTtsController?.abort()
       activeTtsController = null
@@ -164,6 +177,32 @@ export function apply(ctx: ClientContext): void {
       inject: injectFace,
     },
     CompanionToggle,
+  ))
+
+  // Skin manager: toolbar seat that opens the skin picker panel (list /
+  // switch / upload companion videos).
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
+    {
+      name: 'conversation.input.left',
+      id: 'voice-skin-picker',
+      order: 88,
+      locale: NS,
+      inject: injectFace,
+    },
+    SkinPicker,
+  ))
+
+  // Voice manager: toolbar seat that opens the timbre panel (list / switch /
+  // upload reference audio for TTS voice cloning).
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
+    {
+      name: 'conversation.input.left',
+      id: 'voice-manager',
+      order: 89,
+      locale: NS,
+      inject: injectFace,
+    },
+    VoiceManager,
   ))
 
   // QQ reply-push toggle (s2s.voice.qqPush): ON = replies auto-pushed to QQ.

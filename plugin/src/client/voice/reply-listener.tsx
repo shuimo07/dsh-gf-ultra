@@ -58,6 +58,7 @@ export type ReplySpeakerMountProps =
 export const ReplySpeakerMount = memo(function ReplySpeakerMount({
   useSession,
   speaker,
+  livetalking,
   _registerTtsAbort,
   _registerInterruptHandler,
 }: ReplySpeakerMountProps) {
@@ -76,6 +77,12 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
   // at or below it ever speaks. Live (running) nodes are never used for the
   // baseline, so a fresh reply in a brand-new session still speaks.
   const baselineRef = useRef<number | null>(null)
+  // Anchor of the FIRST assistant node observed streaming in (a live reply).
+  // Used to tell "history loading" apart from "a fresh reply in a new session"
+  // when the first settled node arrives: history nodes never stream, so if we
+  // saw a running node, the settled node is the live reply — the baseline
+  // must exclude it or the first reply of a session would never speak.
+  const sawRunningRef = useRef<number | null>(null)
   // Serial TTS fetch chain: sentence N+1's fetch starts after N's resolves
   // (playback drains independently through the speaker queue — pipelined).
   const chainRef = useRef<Promise<void>>(Promise.resolve())
@@ -102,6 +109,19 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
     _registerTtsAbort(null)
   }, [speaker, _registerTtsAbort])
 
+  // Fresh-session guard: if no history has settled shortly after mount, the
+  // session is new (or history is empty) — freeze the baseline at 0 so the
+  // very first reply speaks instead of being consumed as "history".
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (baselineRef.current === null) {
+        baselineRef.current = 0
+        skipUntilRef.current = 0
+      }
+    }, 1500)
+    return () => window.clearTimeout(timer)
+  }, [])
+
   // Stream new complete sentences to TTS on every snapshot change.
   useEffect(() => {
     if (!voiceEnabled()) return
@@ -122,8 +142,10 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
 
     // First settled assistant node arrives: freeze the history baseline so
     // pre-existing replies never replay (page load, session revisit, history
-    // pagination). Running nodes are live replies — they are NOT used here,
-    // so a fresh reply in a new session still speaks.
+    // pagination). If we watched the reply stream in (sawRunningRef), it is
+    // the current live reply — baseline = highest settled anchor BELOW its
+    // anchor, so the fresh reply still speaks; otherwise it is a pure history
+    // load and the baseline swallows everything at or below the max anchor.
     if (baselineRef.current === null) {
       let maxAnchor = 0
       let hasSettled = false
@@ -131,12 +153,26 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
         if (node.kind !== 'assistant-step') continue
         const data = assistantData(node)
         if (data === undefined) continue
+        if (data.status === 'running' && sawRunningRef.current === null) {
+          sawRunningRef.current = node.anchorSeq
+        }
         if (data.status === 'settled') hasSettled = true
         if (node.anchorSeq > maxAnchor) maxAnchor = node.anchorSeq
       }
       if (hasSettled && maxAnchor > 0) {
-        baselineRef.current = maxAnchor
-        skipUntilRef.current = maxAnchor
+        if (sawRunningRef.current !== null) {
+          const liveAnchor = sawRunningRef.current
+          let histAnchor = 0
+          for (const node of snapshot.chat.nodes.values()) {
+            if (node.kind !== 'assistant-step') continue
+            if (node.anchorSeq < liveAnchor && node.anchorSeq > histAnchor) histAnchor = node.anchorSeq
+          }
+          baselineRef.current = histAnchor
+          skipUntilRef.current = histAnchor
+        } else {
+          baselineRef.current = maxAnchor
+          skipUntilRef.current = maxAnchor
+        }
       }
       return
     }
@@ -180,9 +216,17 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
           .then((wav) => {
             if (interruptRef.current || !voiceEnabled()) return
             speaker.speak(wav)
+            // Feed the real-time digital human too: its mouth follows the
+            // TTS audio (no-op when LiveTalking is not connected).
+            livetalking.speak(wav)
           })
           .catch((err) => {
-            if ((err as Error | undefined)?.name !== 'AbortError') {
+            const name = (err as Error | undefined)?.name
+            if (name === 'TimeoutError') {
+              // The bridge stalled on this sentence; skipped so the chain
+              // keeps reading the rest of the reply.
+              console.warn('[ui-voice] reply TTS timed out, skipped sentence:', job.sentence.slice(0, 30))
+            } else if (name !== 'AbortError') {
               console.error('[ui-voice] reply TTS failed:', err)
             }
           })
