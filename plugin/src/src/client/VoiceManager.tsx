@@ -66,6 +66,16 @@ export const VoiceManager = memo(function VoiceManager({ t }: VoiceManagerProps)
     }
   }, [])
 
+  // Refresh on open and while the panel is visible, so voices added/renamed
+  // elsewhere (or a failed one-time load after a bridge restart) show up
+  // without a page reload.
+  useEffect(() => {
+    if (!open) return
+    void reload()
+    const timer = window.setInterval(reload, 15000)
+    return () => window.clearInterval(timer)
+  }, [open, reload])
+
   useEffect(() => {
     void reload()
   }, [reload])
