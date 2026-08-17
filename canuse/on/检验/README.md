@@ -8,15 +8,15 @@
 
 | 服务 | 端口 | 状态 | 进程 | 启动时间 | 说明 |
 |---|---|---|---|---|---|
-| DSH Web | `:3080` | ✅ LISTENING | node（pid 30812，`D:\AI\固件\node.exe`） | 2026-08-18 01:45 | live home = `E:\.dsh` |
-| 语音桥接 | `:8765` | ✅ LISTENING | python3.12（pid 27316，venv-speech uvicorn） | 2026-08-18 01:55 | 日志 `E:\AI\dsh-voice-ai-girlfriend\.scratch\voice-bridge.log` |
+| DSH Web | `:3080` | ✅ LISTENING | node（pid 35104，`D:\AI\固件\node.exe`） | 2026-08-18 02:34（重启过，原 pid 30812） | live home = `E:\.dsh`；重启后 node 半端为 canuse 空版 |
+| 语音桥接 | `:8765` | ✅ LISTENING | python3.12（pid 36672，venv-speech uvicorn） | 2026-08-18 02:40（web 重启后由脚本/后台任务拉起） | 日志 `E:\AI\dsh-voice-ai-girlfriend\.scratch\voice-bridge.log` |
 
 ## 二、插件状态（ui-voice）
 
 - 部署位置（live home）：`E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice\`
-- 版本：**canuse + 自愈增强版** —— `lib\client.js` SHA256 `544106CF89E4…`（比 canuse 原始版多一段 VoiceToggle 自检钩子），与 golden `E:\AI\dsh-voice-ai-girlfriend\dist\ui-voice\` **逐文件一致（0 差异）**
-- web 实际下发：`/plugins/@deepseek-ai/dsh-client-ui-voice/client.js` 响应体哈希 = `544106CF…`（= golden）；boot HTML `rev = a8d1d8c68eee`（= 文件 SHA1，替换后按请求重算）
-- node 半端 `lib/index.js` = 空（383 B）：桥接由脚本拉起；**web 重启后 `/voice-bridge/start` 路由会消失**
+- 版本：**canuse + 自愈增强版** —— `lib\client.js`（65,038 B）SHA256 `CC2AFB8F9B95…`（比 canuse 原始版多一段 VoiceToggle 自检钩子，**每次点击开关都触发**），与 golden `E:\AI\dsh-voice-ai-girlfriend\dist\ui-voice\` **逐文件一致（0 差异）**
+- web 实际下发：`/plugins/@deepseek-ai/dsh-client-ui-voice/client.js` 响应体哈希 = `CC2AFB8F…`（= golden）；boot HTML `rev = 14bd10acc0b7`（= 文件 SHA1，替换后按请求重算）
+- node 半端 `lib/index.js` = 空（383 B）：桥接由脚本拉起；**web 重启后 `/voice-bridge/start` 路由已消失**（2026-08-18 02:34 重启后实测 405）
 
 ## 三、音色库
 
@@ -33,7 +33,7 @@
 | TTS 朗读 | POST `/api/tts` `{"text":"…"}` | ✅ 返回 `audio/wav` 356,396 B / **11.14s** @16kHz 单声道，RMS 5296.9 / peak 26838（非静音），耗时 10.1s |
 | STT 识别 | POST `/api/stt`（合成音频回灌，闭环） | ✅ 识别文本与原文一致（个别音近字属 ASR 正常误差） |
 | 音色管理 | `/api/voices/active|rename|delete|upload` | 接口就绪（未做破坏性测试） |
-| **自愈 selfheal** | POST `/api/selfheal`（点击「开启语音朗读」自动触发） | ✅ 实测：故意破坏 `lib\client.js` 后，自愈检出 `plugin:lib/client.js=drift` 并从 golden 整目录恢复，live/golden/web 下发哈希全部一致（web 未重启，rev 自动更新） |
+| **自愈 selfheal** | POST `/api/selfheal`（**每次点击朗读开关，开/关都触发**） | ✅ 实测：故意破坏 `lib\client.js` 后，自愈检出 `plugin:lib/client.js=drift` 并从 golden 整目录恢复，live/golden/web 下发哈希全部一致（web 未重启，rev 自动更新）；音色 zip 为内存内比对 |
 
 > 测试文案：*「你好呀，我是林起起。语音模块正在自检，这段话应该能被朗读出来，麦克风识别也应该正常。如果顺利，我们就可以继续聊天啦。」*
 
@@ -46,5 +46,5 @@
 
 ## 六、结论
 
-✅ Harness 语音模块处于**运行状态**且功能正常（健康检查、音色、TTS、STT 全通）；
-web 全程**未重启**（client 插件按磁盘内容下发，rev=SHA1，F5 即生效）。
+✅ Harness 语音模块处于**运行状态**且功能正常（健康检查、音色、TTS、STT、自愈全通）；
+web 进程运行正常（pid 35104，2026-08-18 02:34 重启后未再动）；client 插件按磁盘内容下发、rev=SHA1，F5 即生效。

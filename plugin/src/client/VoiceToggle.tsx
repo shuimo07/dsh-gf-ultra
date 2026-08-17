@@ -66,11 +66,12 @@ export const VoiceToggle = memo(function VoiceToggle({ t, speaker, abortTts }: V
       } else {
         // Turning the reading ON: make sure the bridge is up. If it is down
         // the node-half watchdog re-spawns it; wait for /api/health to
-        // answer so the next reply actually reads. Also run the self-heal
-        // check (bridge up, plugin bundle, voice library vs canuse/on state).
+        // answer so the next reply actually reads.
         void ensureBridgeReady()
-        void selfHeal()
       }
+      // Every toggle click (ON or OFF) also runs the self-heal check:
+      // bridge up, plugin bundle, voice library vs canuse/on state.
+      void selfHeal()
       return next
     })
   }, [speaker, abortTts])
