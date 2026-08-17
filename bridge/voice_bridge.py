@@ -306,6 +306,107 @@ async def health() -> dict:
     }
 
 
+@app.post("/api/selfheal")
+async def selfheal() -> dict:
+    """Verify the voice stack against the recorded canuse/on state and repair
+    drift WITHOUT restarting DSH web:
+
+      1. plugin bundle - live profile dir vs golden (dist/ui-voice)
+      2. web delivery  - what :3080 actually serves vs golden
+      3. voice library - assets/voices vs canuse voices-harness.zip
+
+    The web serves client plugins per request with rev = file SHA1, so file
+    restores take effect on the next page refresh (F5) - no restart needed.
+
+    NOTE (2026-08-18): this /api/selfheal endpoint is the bridge-side half of
+    the self-heal feature documented in canuse/on/ (每次点击朗读开关自动核对
+    并修复). It mirrors the change applied to the running bridge
+    (dsh-voice-ai-girlfriend/bridge/voice_bridge.py) - keep both in sync.
+    """
+    import hashlib
+    import shutil
+    import urllib.request
+    import zipfile
+
+    def sha256_bytes(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def sha256_file(path: Path) -> str | None:
+        try:
+            return sha256_bytes(path.read_bytes())
+        except OSError:
+            return None
+
+    PLUGIN_LIVE = Path(r"E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice")
+    PLUGIN_GOLDEN = Path(r"E:\AI\dsh-voice-ai-girlfriend\dist\ui-voice")
+    VOICES_ZIP = Path(r"E:\AI\dsh-gf-ultra\canuse\voices-harness.zip")
+    WEB_PLUGIN_URL = "http://127.0.0.1:3080/plugins/@deepseek-ai/dsh-client-ui-voice/client.js"
+    RUNTIME_FILES = ["package.json", "lib/client.js", "lib/client.js.map", "lib/index.js", "lib/invariant.js"]
+
+    def plugin_ok() -> bool:
+        return all(sha256_file(PLUGIN_GOLDEN / rel) == sha256_file(PLUGIN_LIVE / rel) for rel in RUNTIME_FILES)
+
+    checked: list[str] = []
+    repaired: list[str] = []
+
+    # 1) plugin bundle: live profile dir vs golden
+    for rel in RUNTIME_FILES:
+        gh, lh = sha256_file(PLUGIN_GOLDEN / rel), sha256_file(PLUGIN_LIVE / rel)
+        checked.append(f"plugin:{rel}={'ok' if gh is not None and gh == lh else 'drift'}")
+    if not plugin_ok():
+        try:
+            if PLUGIN_LIVE.exists():
+                shutil.rmtree(PLUGIN_LIVE)
+            shutil.copytree(PLUGIN_GOLDEN, PLUGIN_LIVE)
+            repaired.append("plugin:restored from golden (web picks it up on F5, no restart)")
+        except Exception as exc:  # noqa: BLE001
+            repaired.append(f"plugin:restore failed: {exc}")
+
+    # 2) web delivery: what :3080 serves vs golden client.js
+    served_ok = False
+    try:
+        with urllib.request.urlopen(WEB_PLUGIN_URL, timeout=10) as resp:
+            served_ok = sha256_bytes(resp.read()) == sha256_file(PLUGIN_GOLDEN / "lib" / "client.js")
+        checked.append(f"web:served-client.js={'ok' if served_ok else 'drift'}")
+        if not served_ok:
+            repaired.append("web:served client.js differs - refresh the page (F5) to load the restored bundle")
+    except Exception as exc:  # noqa: BLE001
+        checked.append(f"web:served-client.js=unreachable ({exc})")
+
+    # 3) voice library: assets/voices vs canuse voices zip
+    #    (in-memory zip read - no temp dir, no env TMP dependency)
+    voice_drift = False
+    try:
+        with zipfile.ZipFile(VOICES_ZIP) as zf:
+            for member in zf.namelist():
+                if member.endswith("/"):
+                    continue
+                live = VOICES_ROOT / member
+                gh = sha256_bytes(zf.read(member))
+                lh = sha256_file(live)
+                if gh != lh:
+                    voice_drift = True
+                    try:
+                        live.parent.mkdir(parents=True, exist_ok=True)
+                        live.write_bytes(zf.read(member))
+                        repaired.append(f"voices:{member}=restored")
+                    except Exception as exc:  # noqa: BLE001
+                        repaired.append(f"voices:{member}=restore failed: {exc}")
+                    checked.append(f"voices:{member}=repaired")
+                else:
+                    checked.append(f"voices:{member}=ok")
+    except Exception as exc:  # noqa: BLE001
+        checked.append(f"voices:zip-unreadable ({exc})")
+
+    consistent = plugin_ok() and served_ok and not voice_drift
+    return {
+        "ok": True,
+        "consistent": consistent,
+        "checked": checked,
+        "repaired": repaired,
+    }
+
+
 @app.post("/api/stt")
 async def stt(request: Request) -> dict:
     """Speech to text: 16 kHz PCM16 (raw or WAV) -> { text, language }."""

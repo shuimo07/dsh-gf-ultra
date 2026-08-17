@@ -100,7 +100,7 @@ POST /api/stt  (16kHz PCM16/wav)   → {text, language}
 `POST /api/selfheal`，把语音模块恢复到 `on/检验/` 记录的状态（**无需重启 web**，F5 即生效）：
 
 1. `POST /voice-bridge/start`（web 的 node 半端路由，确保 :8765 在线；**web 重启后**该路由不存在，自动忽略）
-2. `POST /api/selfheal`（桥接端，`voice_bridge.py`）：
+2. `POST /api/selfheal`（桥接端，`voice_bridge.py`；**仓库 `bridge/voice_bridge.py` 同步携带此端点**，见文件内 NOTE 注释）：
    - **插件包**：live `E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice\` vs golden `E:\AI\dsh-voice-ai-girlfriend\dist\ui-voice\`（5 个运行文件哈希），不一致则整目录从 golden 恢复
    - **web 下发**：比对 :3080 实际返回的 client.js 与 golden（若不一致给出 F5 提示）
    - **音色库**：`assets\voices\` vs `canuse\voices-harness.zip`（含 `.active.json`；zip **内存内比对**，不依赖临时目录），缺失/不一致则恢复
