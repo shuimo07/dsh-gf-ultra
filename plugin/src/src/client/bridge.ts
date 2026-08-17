@@ -34,18 +34,34 @@ export async function stt(pcm16: ArrayBuffer): Promise<{ text: string; language?
 
 /** Text to speech: { text } -> 16 kHz mono PCM16 WAV bytes. */
 export async function tts(text: string, signal?: AbortSignal): Promise<ArrayBuffer> {
-  const init: RequestInit = {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+  const controller = new AbortController()
+  // Hard timeout: a hung bridge request (TTS model reload after a voice
+  // switch, GPU contention with the LLM/digital human) must NOT stall the
+  // per-sentence reading chain forever — skip this sentence after 45s.
+  const timeoutId = window.setTimeout(() => {
+    controller.abort(new DOMException('tts timeout', 'TimeoutError'))
+  }, 45000)
+  const onAbort = () => controller.abort(signal?.reason)
+  if (signal !== undefined) {
+    if (signal.aborted) controller.abort(signal.reason)
+    else signal.addEventListener('abort', onAbort, { once: true })
   }
-  if (signal !== undefined) init.signal = signal
-  const resp = await fetch(`${bridgeBase()}/api/tts`, init)
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => '')
-    throw new Error(`voice bridge /api/tts failed: ${resp.status} ${body}`.trim())
+  try {
+    const resp = await fetch(`${bridgeBase()}/api/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      signal: controller.signal,
+    })
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '')
+      throw new Error(`voice bridge /api/tts failed: ${resp.status} ${body}`.trim())
+    }
+    return resp.arrayBuffer()
+  } finally {
+    window.clearTimeout(timeoutId)
+    signal?.removeEventListener('abort', onAbort)
   }
-  return resp.arrayBuffer()
 }
 
 /**

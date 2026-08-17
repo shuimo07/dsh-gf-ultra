@@ -217,7 +217,12 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
             speaker.speak(wav)
           })
           .catch((err) => {
-            if ((err as Error | undefined)?.name !== 'AbortError') {
+            const name = (err as Error | undefined)?.name
+            if (name === 'TimeoutError') {
+              // The bridge stalled on this sentence; skipped so the chain
+              // keeps reading the rest of the reply.
+              console.warn('[ui-voice] reply TTS timed out, skipped sentence:', job.sentence.slice(0, 30))
+            } else if (name !== 'AbortError') {
               console.error('[ui-voice] reply TTS failed:', err)
             }
           })

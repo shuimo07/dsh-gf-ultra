@@ -54,6 +54,11 @@ export class ReplySpeaker {
         } catch {
           // best-effort
         }
+        // Autoplay policy can keep the context suspended (e.g. only typing,
+        // never touching the mic). Nothing will be audible — surface a hint.
+        if (ctx.state === 'suspended') {
+          console.warn('[ui-voice] AudioContext still suspended (autoplay policy); click the mic once to unlock audio')
+        }
       }
       while (this.queue.length > 0 && !this.disposed) {
         const wav = this.queue.shift()!
