@@ -5,12 +5,17 @@
  * re-reads it on every snapshot change, so the switch takes effect from the
  * next reply. The mic input stays available regardless (the toggle controls
  * reading only).
+ *
+ * Turning reading ON first checks the voice bridge: if it is down, the
+ * plugin's node half re-spawns the bridge process and this toggle waits for
+ * it to answer /api/health before reading starts.
  */
 import { memo, useCallback, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls ui-conversation's SlotMap merge for PropsRuntime resolution.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { VoiceInjected } from './contract.ts'
+import { ensureBridgeReady } from './voice/bridge-lifecycle.ts'
 import css from './VoiceToggle.module.css'
 
 const VOICE_ENABLED_KEY = 's2s.voice.enabled'
@@ -57,6 +62,11 @@ export const VoiceToggle = memo(function VoiceToggle({ t, speaker, abortTts }: V
         // synthesizing instead of draining its queue.
         speaker.stop()
         abortTts()
+      } else {
+        // Turning the reading ON: make sure the bridge is up. If it is down
+        // the node-half watchdog re-spawns it; wait for /api/health to
+        // answer so the next reply actually reads.
+        void ensureBridgeReady()
       }
       return next
     })

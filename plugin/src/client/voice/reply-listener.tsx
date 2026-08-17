@@ -22,6 +22,7 @@ import type { AssistantChatData } from '@deepseek-ai/dsh-client-ui-conversation/
 import { tts } from '../bridge.ts'
 import type { VoiceInjected } from '../contract.ts'
 import { cleanReplyText } from './clean.ts'
+import { ensureBridgeReady } from './bridge-lifecycle.ts'
 import { splitSentences } from './sentences.ts'
 
 const VOICE_ENABLED_KEY = 's2s.voice.enabled'
@@ -124,6 +125,11 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
   // Stream new complete sentences to TTS on every snapshot change.
   useEffect(() => {
     if (!voiceEnabled()) return
+
+    // Reading is on: make sure the bridge is reachable (the node-half
+    // watchdog re-spawns it when down; this waits for /api/health to answer).
+    // Idempotent — a quick probe when the bridge is already up.
+    void ensureBridgeReady()
 
     // Barge-in swallowed the CURRENT reply: remember its exact anchor so only
     // that reply's remaining sentences are skipped; replies that appear
