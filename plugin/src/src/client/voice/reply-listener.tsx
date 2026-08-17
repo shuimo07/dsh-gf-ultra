@@ -58,6 +58,7 @@ export type ReplySpeakerMountProps =
 export const ReplySpeakerMount = memo(function ReplySpeakerMount({
   useSession,
   speaker,
+  livetalking,
   _registerTtsAbort,
   _registerInterruptHandler,
 }: ReplySpeakerMountProps) {
@@ -215,6 +216,9 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
           .then((wav) => {
             if (interruptRef.current || !voiceEnabled()) return
             speaker.speak(wav)
+            // Feed the real-time digital human too: its mouth follows the
+            // TTS audio (no-op when LiveTalking is not connected).
+            livetalking.speak(wav)
           })
           .catch((err) => {
             const name = (err as Error | undefined)?.name

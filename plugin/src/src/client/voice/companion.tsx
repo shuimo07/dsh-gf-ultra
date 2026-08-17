@@ -51,7 +51,7 @@ export type CompanionWindowProps =
 /**
  * @param props - framework runtime + locale + injected speaker face.
  */
-export const CompanionWindow = memo(function CompanionWindow({ speaker, companion, skinController }: CompanionWindowProps) {
+export const CompanionWindow = memo(function CompanionWindow({ speaker, companion, skinController, livetalking }: CompanionWindowProps) {
   const [visible, setVisible] = useState<boolean>(companion.visible)
   const [widthVw, setWidthVw] = useState<number>(readWidth)
   const [side, setSide] = useState<'left' | 'right'>(readSide)
@@ -61,14 +61,54 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
   const [bgIndex, setBgIndex] = useState(0)
   const [taskIndex, setTaskIndex] = useState(0)
   const [mediaTick, setMediaTick] = useState(0)
+  const [dhStream, setDhStream] = useState<MediaStream | null>(null)
+  // Digital-human mode: show the LiveTalking real-time video when connected;
+  // the pre-recorded skins stay available via the toggle (persisted).
+  const [dhMode, setDhMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('s2s.voice.livetalkingMode') !== '0'
+    } catch {
+      return true
+    }
+  })
   const idleRef = useRef<HTMLVideoElement | null>(null)
   const speakRef = useRef<HTMLVideoElement | null>(null)
+  const dhRef = useRef<HTMLVideoElement | null>(null)
   const dragRef = useRef<{ startX: number; startWidth: number; current: number } | null>(null)
 
   // Follow the shared companion visibility (the toggle flips it live).
   useEffect(() => {
     return companion.subscribe(() => setVisible(companion.visible))
   }, [companion])
+
+  // Connect the real-time digital human and follow its stream.
+  useEffect(() => {
+    const unsub = livetalking.subscribe(() => {
+      setDhStream(livetalking.videoStream)
+      setDhMode((mode) => mode || livetalking.connected)
+    })
+    void livetalking.connect()
+    return unsub
+  }, [livetalking])
+
+  // Attach the DH stream to the video element when it appears.
+  useEffect(() => {
+    const vid = dhRef.current
+    if (vid === null) return
+    vid.srcObject = dhStream
+  }, [dhStream])
+
+  const toggleDhMode = useCallback(() => {
+    setDhMode((previous) => {
+      const next = !previous
+      try {
+        localStorage.setItem('s2s.voice.livetalkingMode', next ? '1' : '0')
+      } catch {
+        // persistence unavailable — state still flips for this session
+      }
+      return next
+    })
+  }, [])
 
   // Reload media immediately when the skin picker switches skins/uploads.
   useEffect(() => {
@@ -213,7 +253,8 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
     })
   }, [])
 
-  if (!visible || (bgMedia.length === 0 && taskVideos.length === 0)) return null
+  if (!visible) return null
+  if (!dhMode && bgMedia.length === 0 && taskVideos.length === 0) return null
 
   const idleItem = bgMedia[bgIndex % bgMedia.length]
   const idleIsVideo = idleItem !== undefined && idleItem.type === 'video'
@@ -224,15 +265,26 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
       style={{ width: `${widthVw}vw`, right: side === 'right' ? 0 : undefined, left: side === 'left' ? 0 : undefined }}
       aria-hidden="true"
     >
-      {bgMedia.length > 0 && idleIsVideo && (
+      {dhMode && dhStream !== null && (
+        <video ref={dhRef} className={css.video} muted autoPlay playsInline />
+      )}
+      {!dhMode && bgMedia.length > 0 && idleIsVideo && (
         <video ref={idleRef} className={speaking ? `${css.video} ${css.hidden}` : css.video} muted playsInline preload="auto" onEnded={onIdleEnded} />
       )}
-      {bgMedia.length > 0 && idleItem !== undefined && !idleIsVideo && (
+      {!dhMode && bgMedia.length > 0 && idleItem !== undefined && !idleIsVideo && (
         <img src={idleItem.url} className={speaking ? `${css.video} ${css.hidden}` : css.video} alt="" draggable={false} />
       )}
-      {taskVideos.length > 0 && (
+      {!dhMode && taskVideos.length > 0 && (
         <video ref={speakRef} className={speaking ? css.video : `${css.video} ${css.hidden}`} muted playsInline preload="auto" onEnded={onSpeakEnded} />
       )}
+      <button
+        type="button"
+        className={css.dhToggle}
+        title={dhMode ? '数字人模式（点击切回皮肤）' : '皮肤模式（点击切换数字人）'}
+        onClick={toggleDhMode}
+      >
+        {dhMode ? '🤖' : '🎨'}
+      </button>
       <div
         className={css.handle}
         onPointerDown={(event) => {

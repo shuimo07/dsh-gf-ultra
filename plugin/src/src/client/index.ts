@@ -23,6 +23,7 @@ import { CompanionWindow } from './voice/companion.tsx'
 import { SkinPicker } from './SkinPicker.tsx'
 import { VoiceManager } from './VoiceManager.tsx'
 import { CompanionController } from './voice/companion-controller.ts'
+import { LiveTalkingClient } from './voice/livetalking.ts'
 import { SkinController } from './voice/skin-controller.ts'
 import { bridgeBase } from './bridge.ts'
 import type { VoiceInjected } from './contract.ts'
@@ -65,6 +66,10 @@ export function apply(ctx: ClientContext): void {
   // One shared skin controller: the skin picker bumps it, the window reloads.
   const skinController = new SkinController()
 
+  // One shared LiveTalking client: the companion window connects and renders
+  // the real-time digital human; the reply listener feeds it TTS audio.
+  const livetalking = new LiveTalkingClient()
+
   // One shared TTS abort holder: the reply listener registers its current
   // AbortController; the voice toggle aborts it when turned off so the bridge
   // stops synthesizing (client disconnect) instead of draining its queue.
@@ -101,6 +106,7 @@ export function apply(ctx: ClientContext): void {
     speaker,
     companion,
     skinController,
+    livetalking,
     abortTts: () => {
       activeTtsController?.abort()
       activeTtsController = null
