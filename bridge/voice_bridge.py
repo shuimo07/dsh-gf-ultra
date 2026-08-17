@@ -521,6 +521,39 @@ class SkinCreateRequest(BaseModel):
     name: str
 
 
+class SkinRenameRequest(BaseModel):
+    old: str
+    new: str
+
+
+def _validate_item_name(name: str) -> str:
+    cleaned = Path(name).name.strip()
+    if not cleaned or cleaned.startswith(".") or "/" in cleaned or "\\" in cleaned or ".." in cleaned:
+        raise HTTPException(status_code=400, detail="invalid name")
+    return cleaned
+
+
+@app.post("/api/skins/rename")
+async def skins_rename(req: SkinRenameRequest) -> dict:
+    """Rename a skin folder; keeps it active if it was the active skin."""
+    old = _validate_item_name(req.old)
+    new = _validate_item_name(req.new)
+    old_dir = SKINS_ROOT / old
+    if not old_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"skin not found: {old}")
+    new_dir = SKINS_ROOT / new
+    if new_dir.exists():
+        raise HTTPException(status_code=409, detail=f"skin already exists: {new}")
+    try:
+        old_dir.rename(new_dir)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"rename failed: {exc}") from exc
+    if _read_active_skin() == old:
+        SKINS_STATE.write_text(json.dumps({"active": new}, ensure_ascii=False), encoding="utf-8")
+    logger.info("skin %s -> %s", old, new)
+    return {"skins": _skins_payload(), "active": _read_active_skin()}
+
+
 @app.post("/api/skins/create")
 async def skins_create(req: SkinCreateRequest) -> dict:
     """Create a new skin folder (assets/skins/<name>/bg + talk)."""
@@ -643,18 +676,44 @@ def _effective_tts_cfg() -> dict:
 
 
 def _decode_upload_audio(body: bytes) -> np.ndarray:
-    """Decode an uploaded reference clip (wav/mp3/...) to 16 kHz mono float32."""
-    import soundfile as sf
+    """Decode an uploaded reference clip to 16 kHz mono float32.
 
-    data, sr = sf.read(io.BytesIO(body), dtype="float32", always_2d=False)
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-    if sr != 16000:
-        from scipy.signal import resample_poly
+    Accepts wav/mp3/flac/ogg via soundfile; .mp4/.webm/.m4a (video containers
+    whose audio track is all we need) via PyAV (bundled FFmpeg decoders).
+    """
+    # PyAV path first: handles mp4/mov/webm/m4a (AAC etc.) natively.
+    try:
+        import av
 
-        gcd = int(np.gcd(sr, 16000))
-        data = resample_poly(data, up=16000 // gcd, down=sr // gcd)
-    return np.ascontiguousarray(data, dtype=np.float32)
+        container = av.open(io.BytesIO(body))
+        stream = next((s for s in container.streams if s.type == "audio"), None)
+        if stream is None:
+            raise ValueError("no audio stream in container")
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+        chunks = []
+        for frame in container.decode(stream):
+            for out in resampler.resample(frame):
+                chunks.append(out.to_ndarray().ravel())
+        for out in resampler.resample(None):
+            chunks.append(out.to_ndarray().ravel())
+        container.close()
+        if not chunks:
+            raise ValueError("no audio decoded")
+        data = np.concatenate(chunks).astype(np.float32) / 32768.0
+        return np.ascontiguousarray(data, dtype=np.float32)
+    except Exception:
+        # Fallback: soundfile (wav/mp3/flac/ogg native support).
+        import soundfile as sf
+
+        data, sr = sf.read(io.BytesIO(body), dtype="float32", always_2d=False)
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        if sr != 16000:
+            from scipy.signal import resample_poly
+
+            gcd = int(np.gcd(sr, 16000))
+            data = resample_poly(data, up=16000 // gcd, down=sr // gcd)
+        return np.ascontiguousarray(data, dtype=np.float32)
 
 
 @app.get("/api/voices")
@@ -672,6 +731,32 @@ async def voices_list() -> dict:
 
 class VoiceActiveRequest(BaseModel):
     voice: str
+
+
+class VoiceRenameRequest(BaseModel):
+    old: str
+    new: str
+
+
+@app.post("/api/voices/rename")
+async def voices_rename(req: VoiceRenameRequest) -> dict:
+    """Rename a voice folder; keeps it active if it was the active voice."""
+    old = _validate_item_name(req.old)
+    new = _validate_item_name(req.new)
+    old_dir = VOICES_ROOT / old
+    if not old_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"voice not found: {old}")
+    new_dir = VOICES_ROOT / new
+    if new_dir.exists():
+        raise HTTPException(status_code=409, detail=f"voice already exists: {new}")
+    try:
+        old_dir.rename(new_dir)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"rename failed: {exc}") from exc
+    if _active_voice() == old:
+        VOICES_STATE.write_text(json.dumps({"active": new}, ensure_ascii=False), encoding="utf-8")
+    logger.info("voice %s -> %s", old, new)
+    return {"voices": voices_list_payload(), "active": _active_voice()}
 
 
 @app.post("/api/voices/active")
