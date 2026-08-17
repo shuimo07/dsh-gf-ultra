@@ -10,6 +10,7 @@ import { memo, useCallback, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls ui-conversation's SlotMap merge for PropsRuntime resolution.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { bridgeBase } from './bridge.ts'
 import type { VoiceInjected } from './contract.ts'
 import css from './VoiceToggle.module.css'
 
@@ -52,11 +53,12 @@ export const VoiceToggle = memo(function VoiceToggle({ t, speaker, abortTts }: V
         // persistence unavailable — state still flips for this session
       }
       if (!next) {
-        // Turning the reading OFF: interrupt any reply currently being read
-        // AND abort the in-flight TTS request so the bridge stops
-        // synthesizing instead of draining its queue.
+        // Turning the reading OFF: interrupt any reply currently being read,
+        // abort the in-flight TTS request, and ask the bridge to unload its
+        // heavy STT/TTS models (frees RAM/VRAM until the next voice use).
         speaker.stop()
         abortTts()
+        fetch(`${bridgeBase()}/api/bridge/unload`, { method: 'POST' }).catch(() => {})
       }
       return next
     })

@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -172,6 +173,27 @@ class ModelManager:
                 self._tts_error = f"{type(exc).__name__}: {exc}"
                 raise HTTPException(status_code=503, detail=f"TTS model load failed: {self._tts_error}")
         return self._tts
+
+    async def unload(self) -> None:
+        """Drop the loaded STT/TTS handlers and free GPU memory (voice features off)."""
+        async with self._load_lock:
+            self._stt = None
+            self._tts = None
+            self._tts_voice = None
+            self._stt_error = None
+            self._tts_error = None
+        # Best-effort CUDA cache release (only if torch is already imported).
+        try:
+            if "torch" in sys.modules:
+                import gc
+
+                import torch
+
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:  # noqa: BLE001 - freeing memory is best-effort
+            logger.exception("model unload cache cleanup failed")
 
 
 def _load_stt_handler():
@@ -1273,6 +1295,17 @@ def _spawn_detached(args: list[str], cwd: Path, log: str) -> None:
         stderr=subprocess.STDOUT,
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
     )
+
+
+@app.post("/api/bridge/unload")
+async def bridge_unload() -> dict:
+    """Free the loaded STT/TTS models and CUDA cache (voice reading turned off).
+
+    The bridge process stays (it also serves skins/voices/media/companion
+    APIs); only the heavy models are released so RAM/VRAM drops back to the
+    light idle footprint. Models reload lazily on the next STT/TTS call."""
+    await models.unload()
+    return {"ok": True, "stt": models.stt_ready, "tts": models.tts_ready}
 
 
 @app.post("/api/companion/start")
