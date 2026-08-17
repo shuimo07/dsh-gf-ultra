@@ -72,14 +72,39 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
     return companion.subscribe(() => setVisible(companion.visible))
   }, [companion])
 
+  // One-click backend lifecycle: showing the window starts the digital human
+  // (LiveTalking :8010) and the local LLM (llama-server :8090) via the bridge;
+  // hiding it stops them. The bridge endpoints are no-ops when the services
+  // are already up/down.
+  const companionStartedRef = useRef(false)
+  useEffect(() => {
+    const base = bridgeBase()
+    if (visible) {
+      if (!companionStartedRef.current) {
+        companionStartedRef.current = true
+        fetch(`${base}/api/companion/start`, { method: 'POST' }).catch(() => {})
+      }
+    } else if (companionStartedRef.current) {
+      companionStartedRef.current = false
+      fetch(`${base}/api/companion/stop`, { method: 'POST' }).catch(() => {})
+    }
+  }, [visible])
+
+  // Re-try the digital-human connection when the window is shown (the server
+  // may have come up after this page loaded).
+  useEffect(() => {
+    if (visible && !livetalking.connected) void livetalking.connect()
+  }, [visible, livetalking])
+
   // Connect the real-time digital human and follow its stream. When
   // LiveTalking is reachable the window IS the digital human; the pre-recorded
   // skins render only as an automatic fallback while it is not connected.
   useEffect(() => {
     const unsub = livetalking.subscribe(() => {
       setDhStream(livetalking.videoStream)
+      console.log('[ui-voice] LiveTalking stream:', livetalking.videoStream === null ? 'null' : 'ready')
     })
-    void livetalking.connect()
+    livetalking.connect().catch(() => {})
     return unsub
   }, [livetalking])
 
@@ -235,6 +260,9 @@ export const CompanionWindow = memo(function CompanionWindow({ speaker, companio
 
   if (!visible) return null
   if (dhStream === null && bgMedia.length === 0 && taskVideos.length === 0) return null
+
+  // Diagnostic: why the window may appear empty.
+  console.log(`[ui-voice] companion render: visible=${visible} dh=${dhStream !== null} media=${bgMedia.length} talk=${taskVideos.length}`)
 
   const idleItem = bgMedia[bgIndex % bgMedia.length]
   const idleIsVideo = idleItem !== undefined && idleItem.type === 'video'

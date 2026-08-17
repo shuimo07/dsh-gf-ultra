@@ -24,6 +24,7 @@ import io
 import json
 import logging
 import os
+import subprocess
 import threading
 from pathlib import Path
 
@@ -1226,3 +1227,89 @@ async def vad_endpoint(ws: WebSocket) -> None:
             await ws.close()
         except Exception:
             pass
+
+
+# ── Companion backend lifecycle: start/stop the digital human + local LLM ──
+#
+# The DSH companion window calls these when it is shown/hidden: showing the
+# window starts LiveTalking (:8010) and llama-server (:8090), hiding it stops
+# them. Processes are spawned detached so they survive this bridge.
+
+LIVETALKING_DIR = REPO_ROOT.parent / "LiveTalking"
+LIVETALKING_PY = LIVETALKING_DIR / ".venv-lt" / "Scripts" / "python.exe"
+LLAMA_EXE = Path(r"E:\llama-cpp\llama-server.exe")
+LLAMA_MODEL = Path(r"E:\llama-cpp\models\Qwen3-4B-Q4_K_M.gguf")
+
+
+def _port_pid(port: int) -> int | None:
+    import psutil
+
+    for conn in psutil.net_connections(kind="tcp"):
+        if conn.laddr and conn.laddr.port == port and conn.status == "LISTEN":
+            return conn.pid
+    return None
+
+
+def _companion_env() -> dict:
+    env = dict(os.environ)
+    env["PATH"] = str(REPO_ROOT.parent / "ffmpeg") + os.pathsep + env.get("PATH", "")
+    scratch = REPO_ROOT / ".scratch"
+    env["TMP"] = str(scratch)
+    env["TEMP"] = str(scratch)
+    env["HF_HOME"] = str(scratch / "hf-home")
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def _spawn_detached(args: list[str], cwd: Path, log: str) -> None:
+    env = _companion_env()
+    log_file = (REPO_ROOT / ".scratch" / log).open("ab")
+    subprocess.Popen(
+        args,
+        cwd=str(cwd),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+
+
+@app.post("/api/companion/start")
+async def companion_start() -> dict:
+    """Start LiveTalking (:8010) and llama-server (:8090) if not running."""
+    started = []
+    if _port_pid(8010) is None and LIVETALKING_PY.is_file():
+        _spawn_detached(
+            [str(LIVETALKING_PY), "app.py", "--transport", "webrtc", "--model", "wav2lip", "--avatar_id", "wav2lip256_avatar1"],
+            LIVETALKING_DIR,
+            "livetalking.log",
+        )
+        started.append("livetalking")
+    if _port_pid(8090) is None and LLAMA_EXE.is_file() and LLAMA_MODEL.is_file():
+        _spawn_detached(
+            [str(LLAMA_EXE), "-m", str(LLAMA_MODEL), "-np", "1", "-c", "8192", "-fa", "on", "--temp", "1.0", "--host", "0.0.0.0", "--port", "8090"],
+            REPO_ROOT.parent,
+            "llama.log",
+        )
+        started.append("llama")
+    logger.info("companion start requested; started=%s", started)
+    return {"ok": True, "started": started}
+
+
+@app.post("/api/companion/stop")
+async def companion_stop() -> dict:
+    """Stop LiveTalking (:8010) and llama-server (:8090)."""
+    stopped = []
+    for port in (8010, 8090):
+        pid = _port_pid(port)
+        if pid is not None:
+            try:
+                import psutil
+
+                psutil.Process(pid).terminate()
+                stopped.append(port)
+            except Exception:  # noqa: BLE001 - best-effort stop
+                logger.exception("companion stop failed for port %s", port)
+    logger.info("companion stop requested; stopped=%s", stopped)
+    return {"ok": True, "stopped": stopped}

@@ -15,6 +15,7 @@ export class LiveTalkingClient {
   private _connected = false
   private listeners = new Set<() => void>()
   private pendingWav: ArrayBuffer[] = []
+  private retryTimer: number | null = null
 
   /** True once the WebRTC session is established. */
   get connected(): boolean {
@@ -47,7 +48,7 @@ export class LiveTalkingClient {
 
   /** Establish the WebRTC session (best-effort; skins remain the fallback). */
   async connect(): Promise<void> {
-    if (this.pc !== null) return
+    if (this.pc !== null || this.retryTimer !== null) return
     const pc = new RTCPeerConnection()
     pc.addTransceiver('video', { direction: 'recvonly' })
     pc.addTransceiver('audio', { direction: 'recvonly' })
@@ -86,6 +87,14 @@ export class LiveTalkingClient {
       this.stream = null
       this._connected = false
       try { pc.close() } catch { /* already closed */ }
+      // Retry later so a LiveTalking server started after this page did still
+      // gets picked up (the companion window also nudges connect on show).
+      if (this.retryTimer === null) {
+        this.retryTimer = window.setTimeout(() => {
+          this.retryTimer = null
+          void this.connect()
+        }, 15000)
+      }
     }
   }
 
@@ -110,6 +119,10 @@ export class LiveTalkingClient {
 
   /** Tear down the session (plugin teardown). */
   dispose(): void {
+    if (this.retryTimer !== null) {
+      window.clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
     this.pendingWav = []
     this._connected = false
     this.stream = null
