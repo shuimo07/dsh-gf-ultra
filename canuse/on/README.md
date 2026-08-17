@@ -80,8 +80,8 @@ curl.exe -X POST http://127.0.0.1:3080/voice-bridge/start
 # → {"ok":true,"running":true}
 ```
 
-> 回滚版插件的 node 半端（lib/index.js）原是空的；**2026-08-18 已恢复为带 `/voice-bridge/start|stop` 路由的版本**（live + golden 同步），**下次 web 重启后该路由恢复**。
-> 在恢复生效前（当前 web 实例 2026-08-18 02:46 启动、pid 21828，启动时加载的仍是空半端），路由实测 405，桥接需用方式一/二/三或后台方式拉起。
+> 回滚版插件的 node 半端（lib/index.js）原是空的；**2026-08-18 已恢复为带 `/voice-bridge/start|stop` 路由的版本**（live + golden 同步）。
+> **已于 2026-08-18 02:51 的 web 重启（pid 18788）后生效**：`POST /voice-bridge/start` 实测返回 `{"ok":true,"running":true}`——以后桥接掉线时，点击朗读开关即可自动拉起。
 
 ### ④ 验证
 
@@ -110,7 +110,7 @@ POST /api/stt  (16kHz PCM16/wav)   → {text, language}
 - 当前运行的是 **canuse + 自愈增强版**：`lib\client.js`（65,038 B，SHA256 `CC2AFB8F…`，rev `14bd10acc0b7`）比原始版多了 VoiceToggle 自检钩子（**每次点击都触发**）；golden = `dist\ui-voice\`（profile 的 `file:` 依赖源，同步部署）。
 - `canuse\dsh-client-ui-voice-harness.zip` 保持**原始精简版**不动，作为纯净回滚基线；要增强版就按 golden 恢复。
 - 自愈修复插件后无需重启 web：DSH 按请求读文件、rev = 文件 SHA1（实测 rev `a939c5079090 → a8d1d8c68eee → 14bd10acc0b7`）。
-- **web 重启**：桥接是独立进程，不会随 web 自动重启——web 重启后桥接需手动拉起（方式一/二/三）。node 半端已于 2026-08-18 恢复为带 `/voice-bridge/start|stop` 的版本（live+golden 同步），**下次 web 重启后点击朗读开关即可自动拉起桥接**；在此之前（当前 web 实例 pid 21828）该路由仍不可用（405）。
+- **web 重启**：桥接是独立进程，不会随 web 自动重启——web 重启后桥接需手动拉起（方式一/二/三）。node 半端已恢复为带 `/voice-bridge/start|stop` 的版本（live+golden 同步），**2026-08-18 02:51 重启（pid 18788）后已生效**：路由实测返回 `{"ok":true,"running":true}`，点击朗读开关即可自动拉起桥接。
 
 ## 与 off/ 的关系
 

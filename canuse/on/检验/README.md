@@ -8,15 +8,15 @@
 
 | 服务 | 端口 | 状态 | 进程 | 启动时间 | 说明 |
 |---|---|---|---|---|---|
-| DSH Web | `:3080` | ✅ LISTENING | node（pid 21828，`D:\AI\固件\node.exe`） | 2026-08-18 02:46（再次重启，原 pid 35104/30812） | live home = `E:\.dsh`；该实例启动时加载的 node 半端为空版（路由 405） |
-| 语音桥接 | `:8765` | ✅ LISTENING | python3.12（pid 33688，venv-speech uvicorn） | 2026-08-18 02:48（web 重启后由后台任务拉起） | 访问日志在后台任务输出；`voice-bridge.log` 为脚本拉起时的日志 |
+| DSH Web | `:3080` | ✅ LISTENING | node（pid 18788，`D:\AI\固件\node.exe`） | 2026-08-18 02:51（再次重启，原 pid 21828/35104/30812） | live home = `E:\.dsh`；本实例已加载增强版 node 半端（路由可用） |
+| 语音桥接 | `:8765` | ✅ LISTENING | python3.12（pid 13768，venv-speech uvicorn） | 2026-08-18 02:52（用户/脚本拉起） | 日志 `E:\AI\dsh-voice-ai-girlfriend\.scratch\voice-bridge.log` |
 
 ## 二、插件状态（ui-voice）
 
 - 部署位置（live home）：`E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice\`
 - 版本：**canuse + 自愈增强版** —— `lib\client.js`（65,038 B）SHA256 `CC2AFB8F9B95…`（比 canuse 原始版多一段 VoiceToggle 自检钩子，**每次点击开关都触发**），与 golden `E:\AI\dsh-voice-ai-girlfriend\dist\ui-voice\` **逐文件一致（0 差异）**
 - web 实际下发：`/plugins/@deepseek-ai/dsh-client-ui-voice/client.js` 响应体哈希 = `CC2AFB8F…`（= golden）；boot HTML `rev = 14bd10acc0b7`（= 文件 SHA1，替换后按请求重算）
-- node 半端 `lib/index.js` = 增强版（4,725 B，带 `/voice-bridge/start|stop` 路由，2026-08-18 恢复，live+golden 同步）：**下次 web 重启后路由恢复**，点击朗读开关即可自动拉起桥接；当前 web 实例（02:46 启动）加载的仍是空半端，路由实测 405
+- node 半端 `lib/index.js` = 增强版（4,725 B，带 `/voice-bridge/start|stop` 路由，2026-08-18 恢复，live+golden 同步）：**已生效**——`POST /voice-bridge/start` 实测返回 `{"ok":true,"running":true}`（2026-08-18 02:53），桥接掉线时点击朗读开关即可自动拉起
 
 ## 三、音色库
 
