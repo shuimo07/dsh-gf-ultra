@@ -40,12 +40,37 @@
 | 功能 | 说明 | 状态 |
 |---|---|---|
 | DSH 语音插件（ui-voice） | 麦克风/朗读/插话开关 + 修复隐藏窗口空白 bug + 修复新会话首条回复不朗读 bug | ✅ |
-| 皮肤管理 | 🎨 面板：新建/**重命名**/切换/上传（.mp4 视频 + .jpg 图片待机、视频说话动画），15s 自动刷新 | ✅ |
-| 音色管理 | 🎵 面板：多音色列表/切换/**重命名**/上传参考音频（.mp3 直接识别，.mp4 视频只取音轨，自动转 16k WAV） | ✅ |
+| 皮肤管理 | 🎨 面板：新建/**重命名**/删除（回收站）/切换/上传（.mp4 视频 + .jpg 图片待机、视频说话动画），15s 自动刷新 | ✅ |
+| 音色管理 | 🎵 面板：多音色列表/切换/**重命名**/删除（回收站）/上传参考音频（.mp3 直接识别，.mp4 视频只取音轨，自动转 16k WAV） | ✅ |
 | 口型同步 | LiveTalking wav2lip256：infer ~48fps / final ~25fps（实时），录制 MP4 验证通过 | ✅ |
 | 本地大模型 | llama.cpp + Qwen3-4B-Q4_K_M（2.5GB），`/no_think` 关闭思考，本地回复 | ✅ |
 | 整合网页 | `girlfriend.html`：数字人 + 语音球 + 文字输入，说一句答一句 | ✅ |
 | 一键启动 | `start-girlfriend.cmd` 双击拉起全部服务 | ✅ |
+
+## 一键开关矩阵（服务按需启停，不占资源）
+
+| 你的操作 | 自动触发 |
+|---|---|
+| 🎬 **显示女友窗** | 自动启动 **LiveTalking**（:8010 数字人口型）+ **llama-server**（:8090 本地大模型） |
+| 🎬 **隐藏女友窗** | 自动关闭 LiveTalking + llama-server（释放显存） |
+| 🔊 **关闭语音朗读** | 自动卸载 FunASR + 克隆音色 TTS 模型（释放 ~4GB 显存/运存，桥接 `/api/bridge/unload`） |
+| 🔊 **开启语音朗读** | 模型按需自动重新加载（首次朗读等几秒） |
+
+> 语音桥接进程（:8765，轻量 ~250MB）保持常驻——它同时承载皮肤/音色管理、素材服务与上述一键启停接口；真正吃资源的是模型（~4GB），关朗读即卸载。
+
+## 存储位置（全部在 E 盘）
+
+| 内容 | 位置 |
+|---|---|
+| 项目代码 / 插件 / 脚本 | `E:\AI\dsh-voice-ai-girlfriend`、`E:\AI\dsh-gf-ultra`（本仓库） |
+| LiveTalking（口型） | `E:\AI\LiveTalking`（venv 自带） |
+| 本地大模型 | `E:\llama-cpp`（llama-server + `models\Qwen3-4B-Q4_K_M.gguf` 2.5GB） |
+| ffmpeg | `E:\AI\ffmpeg` |
+| 皮肤 / 音色素材 | `E:\AI\dsh-voice-ai-girlfriend\assets\skins`、`assets\voices` |
+| 模型权重（wav2lip 等） | `E:\AI\LiveTalking\models`、`data\avatars` |
+| 临时 / 缓存 | `E:\AI\dsh-voice-ai-girlfriend\.scratch` |
+
+> C 盘仅写入 DSH 插件本体（`~/.dsh/profiles/web/node_modules`，约 300KB）及少量系统缓存，无大文件。
 
 ## 快速开始
 
