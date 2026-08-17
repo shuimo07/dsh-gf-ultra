@@ -114,6 +114,26 @@ export const SkinPicker = memo(function SkinPicker({ t, skinController }: SkinPi
     }
   }, [newSkinName, skins, switchSkin])
 
+  const renameSkin = useCallback(
+    async (name: string) => {
+      const next = window.prompt(t('skin.renamePrompt'), name)
+      if (next === null || next.trim() === '' || next.trim() === name) return
+      try {
+        const data = await fetch(`${bridgeBase()}/api/skins/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ old: name, new: next.trim() }),
+        }).then((r) => r.json() as Promise<SkinsResponse>)
+        setSkins(data.skins ?? skins)
+        setActive(data.active ?? active)
+        skinController.bump()
+      } catch (err) {
+        console.error('[ui-voice] rename skin failed:', err)
+      }
+    },
+    [skins, active, skinController],
+  )
+
   const pickFile = useCallback((slot: 'bg' | 'talk') => {
     pendingSlotRef.current = slot
     fileRef.current?.click()
@@ -187,6 +207,15 @@ export const SkinPicker = memo(function SkinPicker({ t, skinController }: SkinPi
                         {t('skin.switch')}
                       </button>
                     )}
+                    <button
+                      type="button"
+                      className={css.renameBtn}
+                      title={t('skin.rename')}
+                      aria-label={t('skin.rename')}
+                      onClick={() => void renameSkin(entry.name)}
+                    >
+                      ✏️
+                    </button>
                   </li>
                 )
               })}

@@ -88,6 +88,25 @@ export const VoiceManager = memo(function VoiceManager({ t }: VoiceManagerProps)
     [active, voices],
   )
 
+  const renameVoice = useCallback(
+    async (name: string) => {
+      const next = window.prompt(t('voice.renamePrompt'), name)
+      if (next === null || next.trim() === '' || next.trim() === name) return
+      try {
+        const data = await fetch(`${bridgeBase()}/api/voices/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ old: name, new: next.trim() }),
+        }).then((r) => r.json() as Promise<VoicesResponse>)
+        setVoices(data.voices ?? voices)
+        setActive(data.active ?? active)
+      } catch (err) {
+        console.error('[ui-voice] rename voice failed:', err)
+      }
+    },
+    [voices, active],
+  )
+
   const onUpload = useCallback(async () => {
     if (selectedFile === null) return
     const name = newName.trim()
@@ -159,6 +178,15 @@ export const VoiceManager = memo(function VoiceManager({ t }: VoiceManagerProps)
                         {t('voice.switch')}
                       </button>
                     )}
+                    <button
+                      type="button"
+                      className={css.renameBtn}
+                      title={t('voice.rename')}
+                      aria-label={t('voice.rename')}
+                      onClick={() => void renameVoice(entry.name)}
+                    >
+                      ✏️
+                    </button>
                   </li>
                 )
               })}

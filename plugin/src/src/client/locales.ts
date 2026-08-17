@@ -28,6 +28,8 @@ export const zh = {
   'skin.uploading': '上传中…',
   'skin.create': '新建皮肤',
   'skin.createPlaceholder': '新皮肤名称（如：兔娘）',
+  'skin.rename': '重命名',
+  'skin.renamePrompt': '输入新名称：',
   'voice.openHint': '音色管理',
   'voice.title': '音色管理',
   'voice.close': '关闭',
@@ -42,6 +44,8 @@ export const zh = {
   'voice.upload': '上传并启用',
   'voice.uploading': '处理中…',
   'voice.hint': '切换音色后，下一次朗读生效（首次加载需几秒）。参考音频 3-60 秒、干净人声效果最佳。',
+  'voice.rename': '重命名',
+  'voice.renamePrompt': '输入新名称：',
 } satisfies Record<string, string>
 
 /** The voice namespace key union. */
@@ -75,6 +79,8 @@ export const en = {
   'skin.uploading': 'Uploading…',
   'skin.create': 'New skin',
   'skin.createPlaceholder': 'New skin name',
+  'skin.rename': 'Rename',
+  'skin.renamePrompt': 'New name:',
   'voice.openHint': 'Voice manager',
   'voice.title': 'Voice manager',
   'voice.close': 'Close',
@@ -89,4 +95,6 @@ export const en = {
   'voice.upload': 'Upload & activate',
   'voice.uploading': 'Processing…',
   'voice.hint': 'Switch takes effect on the next reading (a few seconds to load). 3-60s clean voice clips work best.',
+  'voice.rename': 'Rename',
+  'voice.renamePrompt': 'New name:',
 } satisfies Record<VoiceKey, string>
