@@ -1,0 +1,13 @@
+--- a/speech_to_speech/TTS/qwen3_tts_handler.py
++++ b/speech_to_speech/TTS/qwen3_tts_handler.py
+@@ -697,7 +697,8 @@
+         model_type = self._model_type()
+         self._apply_session_voice_override(model_type, runtime_config, response)
+ 
+-        console.print(f"[green]ASSISTANT: {text}")
++        # GBK console cannot encode emoji (e.g. ✅ 🎬); print a sanitized copy
++        # so TTS never dies on the log line.
++        console.print(f"[green]ASSISTANT: {text.encode('gbk', 'ignore').decode('gbk')}")
+ 
+         try:
+             if self.ref_audio:

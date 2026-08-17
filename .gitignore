@@ -1,0 +1,21 @@
+# node / build
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+
+# python
+__pycache__/
+*.pyc
+venv*/
+.venv*/
+
+# local data
+.scratch/
+models/
+assets/voices/.active.json
+assets/skins/.active.json
+
+# os
+Thumbs.db
+.DS_Store

@@ -1,0 +1,17 @@
+--- a/avatars/base_avatar.py
++++ b/avatars/base_avatar.py
+@@ -231,6 +231,13 @@ class BaseAvatar:
+     def start_recording(self):
+         if self.recording:
+             return
++        # Some transports only set width/height from the first rendered frame,
++        # but the recording ffmpeg pipe needs the size up-front. Derive it from
++        # the avatar's base frames when it is still unset (Windows race: the
++        # pipe is spawned before any frame has been rendered).
++        if self.width == 0 and hasattr(self, 'frame_list_cycle'):
++            frames = self.frame_list_cycle
++            if frames is not None and len(frames) > 0:
++                self.height, self.width = frames[0].shape[:2]
+         command = ['ffmpeg',
+                     '-y', '-an',
+                     '-f', 'rawvideo',

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>小雅 · AI 女友</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #0b0d14; color: #e8eaf2; font-family: "Microsoft YaHei", system-ui, sans-serif; }
+  #stage { position: fixed; inset: 0; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center; opacity: .92; }
+  #ballWrap { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 12px; z-index: 5; }
+  #ball {
+    width: 96px; height: 96px; border-radius: 50%;
+    border: none; cursor: pointer;
+    background: radial-gradient(circle at 35% 30%, #6ea8ff, #2a56c8 60%, #142a66);
+    box-shadow: 0 0 30px rgba(80, 130, 255, .55), inset 0 0 18px rgba(255,255,255,.25);
+    transition: transform .15s ease, box-shadow .2s ease;
+  }
+  #ball:hover { transform: scale(1.06); }
+  #ball.listening { background: radial-gradient(circle at 35% 30%, #ff7a7a, #d63a3a 60%, #7a1420); box-shadow: 0 0 44px rgba(255,80,80,.8), inset 0 0 18px rgba(255,255,255,.3); }
+  #ballHint { font-size: 13px; color: #aab4cf; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+  #status { font-size: 12px; color: #7d87a5; text-shadow: 0 1px 3px rgba(0,0,0,.9); }
+  #chat { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); width: min(720px, 92vw); z-index: 6; display: flex; gap: 8px; }
+  #text { flex: 1; padding: 10px 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,.18); background: rgba(12,15,26,.72); color: #e8eaf2; font-size: 14px; outline: none; }
+  #send { padding: 10px 22px; border-radius: 999px; border: none; background: #2a56c8; color: #fff; font-size: 14px; cursor: pointer; }
+  #send:hover { background: #3566e6; }
+  #log { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); width: min(720px, 92vw); z-index: 6; font-size: 13px; line-height: 1.7; text-align: center; text-shadow: 0 1px 3px rgba(0,0,0,.9); }
+  #log .me { color: #8fd0ff; } #log .her { color: #ffd98a; }
+  #connectBtn { position: fixed; right: 18px; top: 18px; z-index: 7; padding: 8px 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,.25); background: rgba(20,26,48,.75); color: #dfe6ff; font-size: 13px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div id="stage"><video id="video" autoplay muted playsinline></video></div>
+  <button id="connectBtn">连接数字人</button>
+  <div id="ballWrap">
+    <button id="ball" aria-label="语音对话"></button>
+    <div id="ballHint">点一下开始说话，说完自动识别</div>
+    <div id="status">未连接</div>
+  </div>
+  <div id="log"></div>
+  <div id="chat">
+    <input id="text" placeholder="也可以打字和她聊天…" />
+    <button id="send">发送</button>
+  </div>
+  <audio id="audio" autoplay style="display:none"></audio>
+  <script src="client.js"></script>
+</body>
+</html>

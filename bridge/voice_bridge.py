@@ -1,0 +1,1061 @@
+"""
+Voice bridge — reuse the speech-to-speech STT / TTS handlers as a local HTTP
+service for the DSH voice plugin.
+
+Pipeline of the original backend (VAD -> STT -> LLM -> TTS) is NOT started:
+this service instantiates only the STT and TTS handlers and exposes them over
+HTTP, so the DSH agent itself plays the LLM role.
+
+Buildout (see DSH-语音接入-设计方案.md):
+  T1  skeleton + /api/health                          done
+  T2  /api/stt   (WhisperSTTHandler, lazy load)       done
+  T3  /api/tts   (Qwen3TTSHandler, lazy load)         done
+  T8  /api/media/* lists + /media/* static mounts     <- current step
+
+Run:
+  D:\\speech-to-speech\\venv-speech\\Scripts\\python.exe -m uvicorn voice_bridge:app \
+      --host 127.0.0.1 --port 8765
+"""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import logging
+import os
+import threading
+from pathlib import Path
+
+import numpy as np
+from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+HERE = Path(__file__).resolve().parent
+# Repo root: this file lives in <repo>/bridge/, so relative paths in
+# bridge-config.json are resolved against the repo root (e.g. media dirs,
+# ref_audio.wav). Absolute paths pass through untouched.
+REPO_ROOT = HERE.parent
+CONFIG_PATH = HERE / "bridge-config.json"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("voice_bridge")
+
+
+def _resolve_path(value: str) -> str:
+    """Resolve a relative path against the repo root; absolute paths unchanged."""
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    return str((REPO_ROOT / path).resolve())
+
+
+def load_config() -> dict:
+    """Load bridge-config.json and normalize relative paths.
+
+    Only TTS model / ref audio / media directories are resolved (they point
+    at local files). The STT model_name stays untouched — it is a HuggingFace
+    model id (e.g. openai/whisper-large-v3) and must NOT be path-resolved.
+    """
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    # FunASR STT model is a LOCAL directory in this repo (models/funasr/...)
+    # — resolve it relative to the repo root like the other paths.
+    if cfg.get("stt", {}).get("backend") == "funasr" and cfg["stt"].get("model_name"):
+        cfg["stt"]["model_name"] = _resolve_path(cfg["stt"]["model_name"])
+
+    tts = cfg.setdefault("tts", {})
+    if tts.get("model_name"):
+        tts["model_name"] = _resolve_path(tts["model_name"])
+    if tts.get("ref_audio"):
+        tts["ref_audio"] = _resolve_path(tts["ref_audio"])
+    tts.setdefault("voices_dir", "assets/voices")
+    if tts.get("voices_dir"):
+        tts["voices_dir"] = _resolve_path(tts["voices_dir"])
+
+    media = cfg.setdefault("media", {})
+    media.setdefault("skins_dir", "assets/skins")
+    for key in ("bg_images_dir", "task_videos_dir", "skins_dir"):
+        if media.get(key):
+            media[key] = _resolve_path(media[key])
+
+    return cfg
+
+
+CONFIG = load_config()
+
+app = FastAPI(title="voice-bridge")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CONFIG.get("cors_origins", ["http://127.0.0.1:3080"]),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class ModelManager:
+    """Owns the two lazily-loaded model handlers.
+
+    Handlers are loaded on first use (heavy: whisper-large-v3 + qwen3-tts,
+    plus TTS warmup ~10-60s), guarded by a lock so concurrent requests queue
+    instead of double-loading. A shared `infer_lock` serializes ALL model
+    work (STT + TTS share the one GPU; single-user local service).
+    """
+
+    def __init__(self) -> None:
+        self._stt = None
+        self._tts = None
+        self._stt_error: str | None = None
+        self._tts_error: str | None = None
+        self._tts_voice: str | None = None
+        self._load_lock = asyncio.Lock()
+        # Serializes every model inference call (STT + TTS) on the shared GPU.
+        self.infer_lock = asyncio.Lock()
+
+    @property
+    def stt_ready(self) -> bool:
+        return self._stt is not None
+
+    @property
+    def tts_ready(self) -> bool:
+        return self._tts is not None
+
+    @property
+    def stt_error(self) -> str | None:
+        return self._stt_error
+
+    @property
+    def tts_error(self) -> str | None:
+        return self._tts_error
+
+    async def ensure_stt(self):
+        """Lazily load the Whisper STT handler once (thread off the event loop)."""
+        async with self._load_lock:
+            if self._stt is not None:
+                return self._stt
+            if self._stt_error is not None:
+                raise HTTPException(status_code=503, detail=f"STT model failed to load: {self._stt_error}")
+            try:
+                self._stt = await asyncio.to_thread(_load_stt_handler)
+            except Exception as exc:  # noqa: BLE001 - surfaced to the client
+                logger.exception("STT model load failed")
+                self._stt_error = f"{type(exc).__name__}: {exc}"
+                raise HTTPException(status_code=503, detail=f"STT model load failed: {self._stt_error}")
+        return self._stt
+
+    async def ensure_tts(self):
+        """Lazily load the Qwen3 TTS handler (T3); rebuilds when the active
+        voice changes so a different reference audio takes effect."""
+        async with self._load_lock:
+            voice = _active_voice()
+            if self._tts is not None and voice != self._tts_voice:
+                logger.info("TTS active voice changed to %s: dropping handler for reload", voice)
+                self._tts = None
+                self._tts_error = None
+            if self._tts is not None:
+                return self._tts
+            if self._tts_error is not None:
+                raise HTTPException(status_code=503, detail=f"TTS model failed to load: {self._tts_error}")
+            try:
+                self._tts = await asyncio.to_thread(_load_tts_handler)
+                self._tts_voice = voice
+            except Exception as exc:  # noqa: BLE001 - surfaced to the client
+                logger.exception("TTS model load failed")
+                self._tts_error = f"{type(exc).__name__}: {exc}"
+                raise HTTPException(status_code=503, detail=f"TTS model load failed: {self._tts_error}")
+        return self._tts
+
+
+def _load_stt_handler():
+    """Instantiate the configured STT backend: 'funasr' (Chinese ASR, default
+    when configured) or the original WhisperSTTHandler fallback."""
+    backend = CONFIG["stt"].get("backend", "whisper")
+    if backend == "funasr":
+        return _load_funasr_handler()
+
+    from queue import Empty, Queue
+    from threading import Event
+
+    from speech_to_speech.STT.whisper_stt_handler import WhisperSTTHandler
+
+    cfg = dict(CONFIG["stt"])
+    cfg.pop("backend", None)
+    handler = WhisperSTTHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(),
+        setup_kwargs=cfg,
+    )
+    return handler
+
+
+def _load_funasr_handler():
+    """Lazily load the FunASR Chinese ASR model (Paraformer-large, 16k).
+
+    Returns the funasr AutoModel; transcribing goes through _transcribe_funasr.
+    The FunASR AutoModel caches its own singleton, so repeated loads are cheap.
+    """
+    from funasr import AutoModel
+
+    model_name = CONFIG["stt"].get(
+        "model_name",
+        "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    )
+    device = CONFIG["stt"].get("device", "cuda")
+    dtype = CONFIG["stt"].get("torch_dtype", "float16")
+    return AutoModel(
+        model=model_name,
+        trust_remote_code=True,
+        device=device,
+        dtype=dtype,
+    )
+
+
+def _load_tts_handler():
+    """Instantiate Qwen3TTSHandler with bridge-config.json['tts'] settings (T3).
+
+    The reference audio/text come from the ACTIVE voice (assets/voices/<name>/)
+    when voices are configured, so switching voices rebuilds the handler with
+    the new reference."""
+    from queue import Queue
+    from threading import Event
+
+    from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+
+    cfg = _effective_tts_cfg()
+    handler = Qwen3TTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),  # should_listen
+        setup_kwargs=cfg,
+    )
+    return handler
+
+
+def decode_audio(body: bytes, content_type: str) -> np.ndarray:
+    """Decode request audio to float32 mono at 16 kHz.
+
+    Accepts WAV (any rate/channels soundfile can read) or raw little-endian
+    16-bit PCM mono at 16 kHz (the mic-capture worklet output)."""
+    if content_type == "audio/wav" or body[:4] == b"RIFF":
+        import soundfile as sf
+
+        data, sr = sf.read(io.BytesIO(body), dtype="float32", always_2d=False)
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+    else:
+        raw = np.frombuffer(body, dtype="<i2")
+        data = raw.astype(np.float32) / 32768.0
+        sr = 16000
+    if sr != 16000:
+        from scipy.signal import resample_poly
+
+        gcd = int(np.gcd(sr, 16000))
+        data = resample_poly(data, up=16000 // gcd, down=sr // gcd)
+    return np.ascontiguousarray(data, dtype=np.float32)
+
+
+def _transcribe(handler, audio: np.ndarray) -> tuple[str, str | None]:
+    if CONFIG["stt"].get("backend", "whisper") == "funasr":
+        return _transcribe_funasr(handler, audio)
+
+    from speech_to_speech.pipeline.messages import VADAudio
+
+    try:
+        transcription = next(iter(handler.process(VADAudio(audio=audio))))
+    except IndexError:
+        # Upstream whisper handler assumes >= 2 generated tokens (language
+        # token + content) and reads pred_ids[0, 1]; a near-silent or very
+        # short utterance can produce a single token and crash. Guard: treat
+        # it as an empty transcription so continuous listening never breaks.
+        logger.warning("STT: whisper returned a degenerate (1-token) generation; treating as empty")
+        return "", None
+    return transcription.text, transcription.language_code
+
+
+def _transcribe_funasr(model, audio: np.ndarray) -> tuple[str, str | None]:
+    """Transcribe 16 kHz mono float32 audio with the FunASR model."""
+    try:
+        result = model.generate(input=audio, cache={})
+        text = (result[0].get("text") or "").strip() if result else ""
+        if not text:
+            logger.warning("STT: funasr returned empty result; treating as empty")
+        return text, "zh"
+    except Exception:  # noqa: BLE001 - surfaced to the client
+        logger.exception("STT: funasr transcribe failed")
+        return "", None
+
+
+models = ModelManager()
+
+
+@app.get("/api/health")
+async def health() -> dict:
+    """Model readiness probe. Overall status is 'ok' once the app serves;
+    stt/tts flags reflect lazy model load state (false until first use)."""
+    return {
+        "status": "ok",
+        "stt": models.stt_ready,
+        "tts": models.tts_ready,
+        "stt_error": models.stt_error,
+        "tts_error": models.tts_error,
+    }
+
+
+@app.post("/api/stt")
+async def stt(request: Request) -> dict:
+    """Speech to text: 16 kHz PCM16 (raw or WAV) -> { text, language }."""
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty body")
+    audio = await asyncio.to_thread(decode_audio, body, request.headers.get("content-type", ""))
+    duration = len(audio) / 16000.0
+    max_sec = float(request.headers.get("X-Max-Audio-Sec", "30") or "30")
+    if duration > max_sec:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Audio too long: {duration:.1f}s exceeds X-Max-Audio-Sec {max_sec}s",
+        )
+    async with models.infer_lock:
+        handler = await models.ensure_stt()
+        text, language = await asyncio.to_thread(_transcribe, handler, audio)
+    return {"text": text, "language": language}
+
+
+class TTSRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/tts")
+async def tts(req: TTSRequest, request: Request) -> Response:
+    """Text to speech: { text } -> 16 kHz mono PCM16 WAV (Xiaoya voice clone).
+
+    Cooperative cancellation: while the client aborts its fetch (the voice
+    toggle turned off), the request disconnects here; a watchdog sets a
+    threading event and the synthesis loop stops between chunks, so the GPU
+    is freed immediately instead of draining the queue."""
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty text")
+    if len(text) > 512:
+        logger.warning("TTS text truncated from %d to 512 chars", len(text))
+        text = text[:512]
+
+    cancel = threading.Event()
+
+    async def watch_disconnect() -> None:
+        while True:
+            if await request.is_disconnected():
+                cancel.set()
+                return
+            await asyncio.sleep(0.2)
+
+    watcher = asyncio.create_task(watch_disconnect())
+    try:
+        async with models.infer_lock:
+            handler = await models.ensure_tts()
+            samples = await asyncio.to_thread(_synthesize, handler, text, cancel)
+    finally:
+        watcher.cancel()
+
+    if cancel.is_set():
+        logger.info("TTS cancelled by client disconnect")
+        raise HTTPException(status_code=499, detail="TTS cancelled by client")
+    wav = _pcm16_to_wav(samples)
+    logger.info("TTS OK: %d chars -> %.2fs wav (%d bytes)", len(text), len(samples) / 16000.0, len(wav))
+    return Response(content=wav, media_type="audio/wav")
+
+
+def _synthesize(handler, text: str, cancel: threading.Event | None = None) -> np.ndarray:
+    """Run the Qwen3 TTS handler for one utterance, concatenating int16 chunks.
+
+    Stops early between chunks when `cancel` is set (client disconnect)."""
+    from speech_to_speech.pipeline.messages import TTSInput
+
+    chunks = []
+    for chunk in handler.process(TTSInput(text=text, language_code="zh")):
+        if cancel is not None and cancel.is_set():
+            logger.info("TTS: cancelled mid-synthesis")
+            break
+        if isinstance(chunk, bytes):
+            chunks.append(np.frombuffer(chunk, dtype=np.int16))
+        else:
+            chunks.append(np.asarray(chunk, dtype=np.int16))
+    if not chunks:
+        raise HTTPException(status_code=500, detail="TTS produced no audio")
+    return np.concatenate(chunks)
+
+
+def _pcm16_to_wav(samples: np.ndarray) -> bytes:
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(samples.astype("<i2").tobytes())
+    return buf.getvalue()
+
+
+# ── Companion media hosting (T8) + skins (T9) ───────────────────────────────
+
+BG_IMAGES_DIR = Path(CONFIG["media"]["bg_images_dir"])
+TASK_VIDEOS_DIR = Path(CONFIG["media"]["task_videos_dir"])
+SKINS_ROOT = Path(CONFIG["media"].get("skins_dir", str(REPO_ROOT / "assets" / "skins")))
+SKINS_STATE = SKINS_ROOT / ".active.json"
+VIDEO_EXTS = {".mp4", ".webm", ".ogg", ".mov", ".m4v"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+
+
+def _list_media(directory: Path) -> list[dict]:
+    if not directory.is_dir():
+        return []
+    entries = []
+    for name in sorted(os.listdir(directory)):
+        ext = Path(name).suffix.lower()
+        if ext in VIDEO_EXTS:
+            entries.append({"name": name, "type": "video"})
+        elif ext in IMAGE_EXTS:
+            entries.append({"name": name, "type": "image"})
+    return entries
+
+
+def _list_skins() -> list[str]:
+    """Skin names = non-hidden subdirectories of the skins root (sorted)."""
+    if not SKINS_ROOT.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in SKINS_ROOT.iterdir()
+        if entry.is_dir() and not entry.name.startswith(".")
+    )
+
+
+def _read_active_skin() -> str | None:
+    """Active skin name, persisted in `.active.json`; falls back to the first skin."""
+    skins = _list_skins()
+    if not skins:
+        return None
+    try:
+        if SKINS_STATE.is_file():
+            state = json.loads(SKINS_STATE.read_text(encoding="utf-8"))
+            name = str(state.get("active", ""))
+            if name in skins:
+                return name
+    except Exception:  # noqa: BLE001 - corrupt state falls back to the first skin
+        pass
+    return skins[0]
+
+
+def _skin_dirs(skin: str | None) -> tuple[Path, Path] | None:
+    if skin is None:
+        return None
+    return SKINS_ROOT / skin / "bg", SKINS_ROOT / skin / "talk"
+
+
+def _bg_dir() -> Path:
+    pair = _skin_dirs(_read_active_skin())
+    return pair[0] if pair is not None else BG_IMAGES_DIR
+
+
+def _talk_dir() -> Path:
+    pair = _skin_dirs(_read_active_skin())
+    return pair[1] if pair is not None else TASK_VIDEOS_DIR
+
+
+@app.get("/api/media/bg-images")
+async def media_bg_images() -> dict:
+    """Idle/background media list for the active skin (videos + images, name-sorted)."""
+    return {"media": _list_media(_bg_dir())}
+
+
+@app.get("/api/media/task-videos")
+async def media_task_videos() -> dict:
+    """Speaking-animation video list for the active skin (videos only, name-sorted)."""
+    return {
+        "videos": [
+            entry["name"]
+            for entry in _list_media(_talk_dir())
+            if entry["type"] == "video"
+        ]
+    }
+
+
+# ── Skins: list / switch / upload ───────────────────────────────────────────
+
+@app.get("/api/skins")
+async def skins_list() -> dict:
+    """Available skins (name + per-slot video lists), plus the active one."""
+    return {"skins": _skins_payload(), "active": _read_active_skin()}
+
+
+def _skins_payload() -> list[dict]:
+    payload = []
+    for name in _list_skins():
+        bg, talk = _skin_dirs(name)  # type: ignore[misc]
+        payload.append(
+            {
+                "name": name,
+                "bg": [entry["name"] for entry in _list_media(bg)],
+                "talk": [entry["name"] for entry in _list_media(talk) if entry["type"] == "video"],
+            }
+        )
+    return payload
+
+
+class SkinActiveRequest(BaseModel):
+    skin: str
+
+
+class SkinCreateRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/skins/create")
+async def skins_create(req: SkinCreateRequest) -> dict:
+    """Create a new skin folder (assets/skins/<name>/bg + talk)."""
+    name = Path(req.name).name.strip()
+    if not name or name.startswith(".") or "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="invalid skin name")
+    try:
+        (SKINS_ROOT / name / "bg").mkdir(parents=True, exist_ok=True)
+        (SKINS_ROOT / name / "talk").mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"cannot create skin: {exc}") from exc
+    logger.info("skin %s created", name)
+    return {"skins": _skins_payload(), "active": _read_active_skin()}
+
+
+@app.post("/api/skins/active")
+async def skins_set_active(req: SkinActiveRequest) -> dict:
+    """Switch the active skin (persisted, so restarts keep the choice)."""
+    if req.skin not in _list_skins():
+        raise HTTPException(status_code=404, detail=f"skin not found: {req.skin}")
+    try:
+        SKINS_ROOT.mkdir(parents=True, exist_ok=True)
+        SKINS_STATE.write_text(
+            json.dumps({"active": req.skin}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"cannot persist skin: {exc}") from exc
+    return {"skins": _skins_payload(), "active": req.skin}
+
+
+@app.post("/api/skins/upload")
+async def skins_upload(skin: str, slot: str, file: UploadFile) -> dict:
+    """Upload a video into a skin's bg/talk folder (companion skin manager)."""
+    if slot not in ("bg", "talk"):
+        raise HTTPException(status_code=400, detail="slot must be bg or talk")
+    if skin not in _list_skins():
+        raise HTTPException(status_code=404, detail=f"skin not found: {skin}")
+    allowed_exts = VIDEO_EXTS | IMAGE_EXTS if slot == "bg" else VIDEO_EXTS
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in allowed_exts:
+        raise HTTPException(status_code=400, detail=f"unsupported file type {ext} (bg accepts video/image, talk accepts video)")
+    target_dir = SKINS_ROOT / skin / slot
+    target_dir.mkdir(parents=True, exist_ok=True)
+    name = Path(file.filename or f"clip{ext}").name
+    dest = target_dir / name
+    if dest.exists():
+        stem = dest.stem
+        counter = 1
+        while (target_dir / f"{stem}-{counter}{ext}").exists():
+            counter += 1
+        dest = target_dir / f"{stem}-{counter}{ext}"
+    MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+    size = 0
+    try:
+        with dest.open("wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    dest.unlink(missing_ok=True)
+                    raise HTTPException(status_code=413, detail="file too large (max 200MB)")
+                out.write(chunk)
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"write failed: {exc}") from exc
+    return {"ok": True, "skin": skin, "slot": slot, "file": dest.name}
+
+
+# ── Voices: reference-audio timbre management ───────────────────────────────
+
+VOICES_ROOT = Path(CONFIG["tts"].get("voices_dir", str(REPO_ROOT / "assets" / "voices")))
+VOICES_STATE = VOICES_ROOT / ".active.json"
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".wma", ".aac", ".webm", ".mp4"}
+
+
+def _list_voices() -> list[str]:
+    """Voice names = non-hidden subdirectories of the voices root (sorted)."""
+    if not VOICES_ROOT.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in VOICES_ROOT.iterdir()
+        if entry.is_dir() and not entry.name.startswith(".")
+    )
+
+
+def _active_voice() -> str | None:
+    """Active voice name, persisted in `.active.json`; falls back to the first voice."""
+    voices = _list_voices()
+    if not voices:
+        return None
+    try:
+        if VOICES_STATE.is_file():
+            state = json.loads(VOICES_STATE.read_text(encoding="utf-8"))
+            name = str(state.get("active", ""))
+            if name in voices:
+                return name
+    except Exception:  # noqa: BLE001 - corrupt state falls back to the first voice
+        pass
+    return voices[0]
+
+
+def _effective_tts_cfg() -> dict:
+    """TTS config with ref_audio/ref_text overridden by the ACTIVE voice.
+
+    Bridge-only keys (voices_dir) are popped: setup_kwargs goes straight to
+    the model handler, which must not see them."""
+    cfg = dict(CONFIG["tts"])
+    cfg.pop("voices_dir", None)
+    active = _active_voice()
+    if active is not None:
+        ref_audio = VOICES_ROOT / active / "ref_audio.wav"
+        ref_text_file = VOICES_ROOT / active / "ref_text.txt"
+        if ref_audio.is_file():
+            cfg["ref_audio"] = str(ref_audio)
+            if ref_text_file.is_file():
+                cfg["ref_text"] = ref_text_file.read_text(encoding="utf-8").strip()
+    return cfg
+
+
+def _decode_upload_audio(body: bytes) -> np.ndarray:
+    """Decode an uploaded reference clip (wav/mp3/...) to 16 kHz mono float32."""
+    import soundfile as sf
+
+    data, sr = sf.read(io.BytesIO(body), dtype="float32", always_2d=False)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if sr != 16000:
+        from scipy.signal import resample_poly
+
+        gcd = int(np.gcd(sr, 16000))
+        data = resample_poly(data, up=16000 // gcd, down=sr // gcd)
+    return np.ascontiguousarray(data, dtype=np.float32)
+
+
+@app.get("/api/voices")
+async def voices_list() -> dict:
+    """Available voices (name + ref text), plus the active one."""
+    voices = []
+    for name in _list_voices():
+        ref_text = ""
+        ref_text_file = VOICES_ROOT / name / "ref_text.txt"
+        if ref_text_file.is_file():
+            ref_text = ref_text_file.read_text(encoding="utf-8").strip()
+        voices.append({"name": name, "ref_text": ref_text})
+    return {"voices": voices, "active": _active_voice()}
+
+
+class VoiceActiveRequest(BaseModel):
+    voice: str
+
+
+@app.post("/api/voices/active")
+async def voices_set_active(req: VoiceActiveRequest) -> dict:
+    """Switch the active voice (persisted; the TTS handler reloads on next use)."""
+    if req.voice not in _list_voices():
+        raise HTTPException(status_code=404, detail=f"voice not found: {req.voice}")
+    try:
+        VOICES_ROOT.mkdir(parents=True, exist_ok=True)
+        VOICES_STATE.write_text(
+            json.dumps({"active": req.voice}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"cannot persist voice: {exc}") from exc
+    return {"voices": voices_list_payload(), "active": req.voice}
+
+
+def voices_list_payload() -> list[dict]:
+    payload = []
+    for name in _list_voices():
+        ref_text = ""
+        ref_text_file = VOICES_ROOT / name / "ref_text.txt"
+        if ref_text_file.is_file():
+            ref_text = ref_text_file.read_text(encoding="utf-8").strip()
+        payload.append({"name": name, "ref_text": ref_text})
+    return payload
+
+
+@app.post("/api/voices/upload")
+async def voices_upload(voice: str, text: str, file: UploadFile) -> dict:
+    """Create or update a voice from an uploaded reference clip + its text.
+
+    The audio is decoded and normalized to 16 kHz mono WAV (ref_audio.wav);
+    `text` must be the verbatim sentence spoken in the clip (clone quality
+    depends on the text/audio match). The new voice becomes active."""
+    name = Path(voice).name.strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="invalid voice name")
+    ref_text = (text or "").strip()
+    if not ref_text:
+        raise HTTPException(status_code=400, detail="ref text is required (the sentence spoken in the clip)")
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in AUDIO_EXTS:
+        raise HTTPException(status_code=400, detail=f"unsupported audio type {ext}")
+    body = await file.read()
+    if len(body) == 0:
+        raise HTTPException(status_code=400, detail="empty upload")
+    try:
+        samples = await asyncio.to_thread(_decode_upload_audio, body)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the client
+        logger.exception("voice upload decode failed")
+        raise HTTPException(status_code=422, detail=f"cannot decode audio: {exc}") from exc
+    duration = len(samples) / 16000.0
+    if duration < 3 or duration > 60:
+        raise HTTPException(
+            status_code=422,
+            detail=f"reference clip should be 3-60s long, got {duration:.1f}s",
+        )
+    target_dir = VOICES_ROOT / name
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        wav = _pcm16_to_wav((samples * 32768).clip(-32768, 32767).astype(np.int16))
+        (target_dir / "ref_audio.wav").write_bytes(wav)
+        (target_dir / "ref_text.txt").write_text(ref_text, encoding="utf-8")
+        VOICES_STATE.write_text(json.dumps({"active": name}, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"write failed: {exc}") from exc
+    logger.info("voice %s uploaded (%.1fs clip)", name, duration)
+    return {"ok": True, "voice": name, "duration": round(duration, 1), "active": name}
+
+
+# Dynamic Range-capable video serving for the active skin's folders.
+@app.get("/media/bg-images/{name:path}")
+async def media_bg_file(name: str) -> Response:
+    return _serve_media(_bg_dir(), name)
+
+
+@app.get("/media/task-videos/{name:path}")
+async def media_talk_file(name: str) -> Response:
+    return _serve_media(_talk_dir(), name)
+
+
+def _serve_media(directory: Path, name: str) -> Response:
+    if not directory.is_dir() or "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=404, detail="not found")
+    file = directory / name
+    if not file.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(file)
+
+
+# ── QQ 推送（NapCat OneBot）───────────────────────────────────────────────
+#
+# Sends text and TTS voice to a target QQ via a local NapCat OneBot v11 HTTP
+# endpoint. Config (bridge-config.json):
+#   "qq": {
+#     "enabled": true,
+#     "napcat_base": "http://127.0.0.1:3000",
+#     "napcat_token": "",
+#     "target_qq": 0
+#   }
+
+class QQSendRequest(BaseModel):
+    text: str
+    voice: bool = False
+    user_id: int | None = None  # override the configured target
+
+
+class QQImageRequest(BaseModel):
+    path: str
+    user_id: int | None = None
+
+
+@app.post("/api/qq/image")
+async def qq_send_image(req: QQImageRequest) -> dict:
+    """Send a local image file to the configured QQ."""
+    qq = CONFIG.get("qq", {})
+    if not qq.get("enabled"):
+        raise HTTPException(status_code=400, detail="QQ push disabled in bridge-config.json")
+    base = qq.get("napcat_base", "http://127.0.0.1:3000")
+    token = qq.get("napcat_token", "")
+    user_id = req.user_id or qq.get("target_qq")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="target_qq not configured")
+    if not Path(req.path).is_file():
+        raise HTTPException(status_code=404, detail=f"image not found: {req.path}")
+    from qq_bridge import send_image
+
+    try:
+        result = send_image(base, token, user_id, req.path)
+        return {"ok": True, "user_id": user_id, "napcat": result}
+    except Exception as exc:  # noqa: BLE001 - surfaced to the client
+        logger.exception("QQ image send failed")
+        raise HTTPException(status_code=502, detail=f"QQ image send failed: {exc}") from exc
+
+
+@app.post("/api/qq/send")
+async def qq_send(req: QQSendRequest) -> dict:
+    """Send { text } (and optionally TTS voice) to the configured QQ."""
+    qq = CONFIG.get("qq", {})
+    if not qq.get("enabled"):
+        raise HTTPException(status_code=400, detail="QQ push disabled in bridge-config.json")
+    base = qq.get("napcat_base", "http://127.0.0.1:3000")
+    token = qq.get("napcat_token", "")
+    user_id = req.user_id or qq.get("target_qq")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="target_qq not configured")
+    if not req.text.strip() and not req.voice:
+        raise HTTPException(status_code=400, detail="Empty text")
+
+    from qq_bridge import send_text, send_voice
+
+    try:
+        if req.voice:
+            if not req.text.strip():
+                raise HTTPException(status_code=400, detail="voice needs text to synthesize")
+            text = (req.text or "").strip()[:512]
+            cancel = threading.Event()
+            async with models.infer_lock:
+                handler = await models.ensure_tts()
+                samples = await asyncio.to_thread(_synthesize, handler, text, cancel)
+            result = send_voice(base, token, user_id, samples.astype("<i2").tobytes())
+        else:
+            result = send_text(base, token, user_id, req.text.strip()[:2000])
+        return {"ok": True, "user_id": user_id, "napcat": result}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surfaced to the client
+        logger.exception("QQ send failed")
+        raise HTTPException(status_code=502, detail=f"QQ send failed: {exc}") from exc
+
+
+# ── QQ 双向：事件接收 + 插件 WS 桥 ────────────────────────────────────────
+#
+# NapCat 把消息事件 POST 到 /api/qq/event（HTTP 上报 postUrls）；桥接再把
+# 私聊文本推给已连接的浏览器插件（/api/qq/ws）。插件注入 DSH，回复完成后
+# 把回复文本发回桥接（WS {"type":"reply"}），桥接 TTS→silk→QQ 发出。
+# 单连接设计（个人使用）：新连接顶掉旧连接。
+
+_qq_ws_conn: WebSocket | None = None
+_qq_ws_lock = asyncio.Lock()
+
+
+async def _qq_push(json_msg: dict) -> None:
+    global _qq_ws_conn
+    async with _qq_ws_lock:
+        conn = _qq_ws_conn
+    if conn is not None:
+        try:
+            await conn.send_json(json_msg)
+        except Exception:
+            logger.debug("QQ ws push failed (client gone)", exc_info=True)
+
+
+@app.post("/api/qq/event")
+async def qq_event(body: dict) -> dict:
+    """OneBot v11 HTTP 上报入口（NapCat postUrls）。私聊文本消息 → 推给插件。"""
+    try:
+        post_type = body.get("post_type")
+        if post_type == "message" and body.get("message_type") == "private":
+            user_id = body.get("user_id")
+            text = str(body.get("raw_message") or body.get("message") or "").strip()
+            if user_id and text:
+                await _qq_push({"type": "qq_message", "user_id": user_id, "text": text})
+                logger.info("QQ event: %s -> %s", user_id, text[:40])
+    except Exception:  # noqa: BLE001 - never break the upstream event feed
+        logger.exception("QQ event handling failed")
+    return {"ok": True}
+
+
+@app.websocket("/api/qq/onebot")
+async def qq_onebot_ws(ws: WebSocket) -> None:
+    """NapCat WebSocket 客户端连到这里（OneBot 事件推送）。
+
+    在 NapCat WebUI 网络配置里添加一个「WebSocket 客户端」指向
+    ws://127.0.0.1:8765/api/qq/onebot，NapCat 会把全部事件推过来；
+    私聊文本消息同样经 _qq_push 转给浏览器插件。这绕开了 HTTP 3000
+    服务不稳定时的事件上报缺口。
+    """
+    await ws.accept()
+    try:
+        while True:
+            raw = await ws.receive_text()
+            if not raw.strip():
+                continue
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            post_type = body.get("post_type")
+            if post_type == "message" and body.get("message_type") == "private":
+                user_id = body.get("user_id")
+                text = str(body.get("raw_message") or body.get("message") or "").strip()
+                if user_id and text:
+                    await _qq_push({"type": "qq_message", "user_id": user_id, "text": text})
+                    logger.info("QQ event(ws): %s -> %s", user_id, text[:40])
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("QQ onebot ws error")
+
+
+@app.websocket("/api/qq/ws")
+async def qq_ws(ws: WebSocket) -> None:
+    """插件桥连接：桥接 → 插件(qq_message)，插件 → 桥接(reply → 发 QQ)。"""
+    global _qq_ws_conn
+    await ws.accept()
+    async with _qq_ws_lock:
+        old = _qq_ws_conn
+        _qq_ws_conn = ws
+    if old is not None:
+        try:
+            await old.close()
+        except Exception:
+            pass
+    try:
+        while True:
+            raw = await ws.receive_json()
+            if not isinstance(raw, dict):
+                continue
+            if raw.get("type") == "reply":
+                text = str(raw.get("text") or "").strip()
+                if text:
+                    qq = CONFIG.get("qq", {})
+                    if qq.get("enabled"):
+                        try:
+                            # 先发原始文本，再发 TTS 语音（复用 /api/qq/send 逻辑）
+                            resp_text = await qq_send(QQSendRequest(text=text, voice=False))
+                            resp_voice = await qq_send(QQSendRequest(text=text, voice=True))
+                            await ws.send_json({"type": "sent", "ok": True, "text": resp_text, "voice": resp_voice})
+                        except HTTPException as exc:
+                            await ws.send_json({"type": "sent", "ok": False, "detail": exc.detail})
+                    else:
+                        await ws.send_json({"type": "sent", "ok": False, "detail": "QQ push disabled"})
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("QQ ws error")
+    finally:
+        async with _qq_ws_lock:
+            if _qq_ws_conn is ws:
+                _qq_ws_conn = None
+
+
+# ── Silero VAD endpoint (barge-in detection) ──────────────────────────────
+#
+# The original speech-to-speech project runs VAD on the SERVER with silero-vad,
+# a neural network trained to tell a real human voice apart from noise / music /
+# TTS echo. Our browser-side RMS threshold cannot do that, which is why ambient
+# sounds kept tripping the barge-in and got STT'd into phantom messages.
+#
+# /api/vad is a WebSocket: while a reply is playing the client streams its mic
+# PCM16 chunks here; the server runs them through silero VAD (loaded from the
+# local <repo>/models/silero-vad/ directory, NOT the torch hub cache) and
+# replies {"event":"speech_start"} only when a real voice is heard — the
+# client then interrupts the reply. Chunks are never stored.
+
+class VADSession:
+    """One silero VAD session per WebSocket connection.
+
+    Loads silero_vad_v4.jit (stable, no annotator) from <repo>/models/, falling
+    back to silero_vad.jit if the v4 file is absent. State (h/c) lives in the
+    jit model instance, so each session gets a fresh detector.
+    """
+
+    def __init__(self) -> None:
+        import torch
+        from speech_to_speech.VAD.vad_iterator import VADIterator
+
+        models_dir = HERE / "models" / "silero-vad"
+        model_path = models_dir / "silero_vad_v4.jit"
+        if not model_path.is_file():
+            model_path = models_dir / "silero_vad.jit"
+        if not model_path.is_file():
+            raise RuntimeError(f"silero-vad model not found under {models_dir}")
+
+        self.model = torch.jit.load(str(model_path), map_location="cpu")
+        self.model.eval()
+        self.iterator = VADIterator(
+            self.model,
+            threshold=0.6,
+            sampling_rate=16000,
+            min_silence_duration_ms=64,
+            speech_pad_ms=30,
+        )
+        self.min_speech_ms = 384
+        self.speech_started = False
+        # Byte buffer: client chunks (any size) accumulate until a full
+        # 512-sample window is available — silero gets CONTINUOUS audio, never
+        # zero-padded frames (padding between real audio breaks VAD state).
+        self._buf = b""
+
+    def feed(self, pcm16: bytes) -> list[dict]:
+        """Feed one 16 kHz PCM16 chunk (any size); returns outbound JSON events.
+
+        Silero VAD requires fixed 512-sample windows at 16 kHz; chunks are
+        buffered and cut into 512-sample frames so the audio stream stays
+        contiguous. A barge-in fires once sustained speech reaches
+        min_speech_ms (384ms) — the same confirmation the original project
+        applies. VADAudio outputs (final utterances) are intentionally ignored
+        here — this endpoint only signals barge-in timing; the client keeps
+        its own capture for STT.
+        """
+        import numpy as np
+        import torch
+
+        self._buf += pcm16
+        out: list[dict] = []
+        while len(self._buf) >= 1024:  # 512 int16 samples = 1024 bytes
+            window = self._buf[:1024]
+            self._buf = self._buf[1024:]
+            x = np.frombuffer(window, dtype=np.int16).astype(np.float32) / 32768.0
+            utterance = self.iterator(torch.from_numpy(x))
+            if self.iterator.triggered and not self.speech_started:
+                active_ms = self.iterator.active_speech_samples / 16.0
+                if active_ms >= self.min_speech_ms:
+                    self.speech_started = True
+                    out.append({"event": "speech_start"})
+            if utterance is not None:
+                self.speech_started = False
+                out.append({"event": "speech_end"})
+        return out
+
+
+@app.websocket("/api/vad")
+async def vad_endpoint(ws: WebSocket) -> None:
+    """Streaming barge-in VAD. Client pushes raw 16 kHz mono PCM16 (any chunk
+    size, ~40ms typical); server replies speech_start/speech_end JSON when
+    silero VAD hears human speech."""
+    await ws.accept()
+    session = VADSession()
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            if not data:
+                continue
+            for msg in session.feed(data):
+                await ws.send_json(msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("VAD websocket error")
+        try:
+            await ws.close()
+        except Exception:
+            pass
