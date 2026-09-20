@@ -116,6 +116,9 @@ POST /api/stt  (16kHz PCM16/wav)   → {text, language}
   - 修复：从 `dsh.client.inject` 中删除 `@deepseek-ai/dsh-client-runtime`（其余两项 `dsh-client-locale`、`dsh-client-ui-conversation` 在 0.1.6 仍存在）。
   - 已同步 4 处：live（`E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice\package.json`）、golden（`dist\ui-voice\package.json`）、仓库源码（`plugin\package.json`）、开发源（`E:\AI\packages\client\ui-voice\package.json`）。
   - 生效方式：**F5 即可**（宿主按请求读插件文件）；若刷新后按钮仍未出现，说明该实例的客户端插件清单在启动时已固化，需要重启 web 才生效。
+- **2026-09-20 面板位置修复**：0.1.6 的输入框行带 `container-type: inline-size`，它使该行成为 `position: fixed` 后代的包含块 —— 音色管理面板原先"铺满视口、右上角"的浮层因此被限制在输入框行内（看起来贴在最下方）。已改为相对输入框行**向上弹出**的浮层：`position:absolute; inset:auto 0 100% 0`、无全屏遮罩、高度上限 `min(60vh,520px)`、面板 `pointer-events:auto`。
+  - 已同步：live + golden 的 `lib/client.js`（新 rev `9867c98c4cf4`）、仓库源码 `plugin/src/client/VoiceManager.module.css`、开发源 `E:\AI\packages\client\ui-voice\src\client\VoiceManager.module.css`。
+  - 生效方式：F5。
 
 ## 与 off/ 的关系
 

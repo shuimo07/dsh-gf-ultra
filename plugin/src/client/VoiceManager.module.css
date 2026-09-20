@@ -33,21 +33,26 @@
 
 /* ── panel overlay ─────────────────────────────────────────────── */
 
+/*
+ * 2026-09-20: DSH 0.1.6 的输入框行带 `container-type: inline-size`，它会让
+ * `position: fixed` 的后代以该行为包含块 —— 原先铺满视口的遮罩因此被"关"在
+ * 输入框那一行里，面板看起来贴在最下方。改为相对输入框行的**向上弹出浮层**：
+ * bottom:100% 把锚点上移到该行顶边，面板从输入框上方展开（不再有全屏遮罩）。
+ */
 .overlay {
-  position: fixed;
-  inset: 0;
+  position: absolute;
+  inset: auto 0 100% 0;
   z-index: 60;
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: flex-end;
-  background: var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.35));
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .panel {
-  margin: 12px;
+  margin: 0 8px 8px 0;
   width: min(380px, calc(100vw - 24px));
-  max-height: calc(100vh - 24px);
+  max-height: min(60vh, 520px);
   overflow: auto;
   border-radius: 12px;
   border: 1px solid var(--dsw-alias-border-l3, rgba(0, 0, 0, 0.18));
@@ -55,6 +60,7 @@
   color: var(--dsw-alias-label-primary, #1d2539);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
   padding: 12px;
+  pointer-events: auto;
 }
 
 .header {
