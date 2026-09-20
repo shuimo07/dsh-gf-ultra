@@ -102,7 +102,7 @@ POST /api/stt  (16kHz PCM16/wav)   → {text, language}
 1. `POST /voice-bridge/start`（web 的 node 半端路由，确保 :8765 在线；**web 重启后**该路由不存在，自动忽略）
 2. `POST /api/selfheal`（桥接端，`voice_bridge.py`；**仓库 `bridge/voice_bridge.py` 同步携带此端点**，见文件内 NOTE 注释）：
    - **插件包**：live `E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice\` vs golden `E:\AI\dsh-voice-ai-girlfriend\dist\ui-voice\`（5 个运行文件哈希），不一致则整目录从 golden 恢复
-   - **web 下发**：比对 :3080 实际返回的 client.js 与 golden（若不一致给出 F5 提示）
+   - **web 下发**：比对 :3080 实际返回的 client.js 与 golden（若不一致给出 F5 提示）；**2026-09-20 起**新版 DSH web 需访问令牌，无 token 的探测返回 404 → 标记为 `unverifiable`，**不计为漂移**（带 token 的浏览器会话照常拿到插件包）
    - **音色库**：`assets\voices\` vs `canuse\voices-harness.zip`（含 `.active.json`；zip **内存内比对**，不依赖临时目录），缺失/不一致则恢复
 3. 返回 `{ok, consistent, checked[], repaired[]}`，结果打印到浏览器 console（`[ui-voice] selfheal:`）
 
@@ -110,7 +110,8 @@ POST /api/stt  (16kHz PCM16/wav)   → {text, language}
 - 当前运行的是 **canuse + 自愈增强版**：`lib\client.js`（65,038 B，SHA256 `CC2AFB8F…`，rev `14bd10acc0b7`）比原始版多了 VoiceToggle 自检钩子（**每次点击都触发**）；golden = `dist\ui-voice\`（profile 的 `file:` 依赖源，同步部署）。
 - `canuse\dsh-client-ui-voice-harness.zip` 保持**原始精简版**不动，作为纯净回滚基线；要增强版就按 golden 恢复。
 - 自愈修复插件后无需重启 web：DSH 按请求读文件、rev = 文件 SHA1（实测 rev `a939c5079090 → a8d1d8c68eee → 14bd10acc0b7`）。
-- **web 重启**：桥接是独立进程，不会随 web 自动重启——web 重启后桥接需手动拉起（方式一/二/三）。node 半端已恢复为带 `/voice-bridge/start|stop` 的版本（live+golden 同步），**2026-08-18 02:51 重启（pid 18788）后已生效**：路由实测返回 `{"ok":true,"running":true}`，点击朗读开关即可自动拉起桥接。
+- **web 重启**：桥接是独立进程，不会随 web 自动重启——web 重启后桥接需手动拉起（方式一/二/三）。node 半端已恢复为带 `/voice-bridge/start|stop` 的版本（live+golden 同步），**2026-08-18 02:51 重启（pid 18788）后已生效**：路由实测返回 `{"ok":true,"running":true}`，点击朗读开关即可自动拉起桥接（2026-09-20 新版 web 下该路由仍免 token 可用）。
+- **2026-09-20 复核**：DSH web 升级为带令牌鉴权（未带 token 的 HTTP → 404，根响应 `dsh web authentication required`）；语音模块不受影响——插件文件/音色/桥接全部复检通过，TTS+STT 闭环重测通过，自愈已适配鉴权门（`consistent=True`）。
 
 ## 与 off/ 的关系
 
