@@ -1,6 +1,6 @@
-/**
+﻿/**
  * ReplySpeakerMount: hidden per-session component (renders null) that streams
- * assistant text to TTS sentence-by-sentence — mirroring the original
+ * assistant text to TTS sentence-by-sentence 鈥?mirroring the original
  * backend's LMOutputProcessor (per-sentence chunks) so long replies start
  * speaking while the rest are still being synthesized.
  *
@@ -58,14 +58,21 @@ export type ReplySpeakerMountProps =
  */
 export const ReplySpeakerMount = memo(function ReplySpeakerMount({
   useSession,
+  useChat,
   speaker,
   _registerTtsAbort,
   _registerInterruptHandler,
 }: ReplySpeakerMountProps) {
-  // Subscribe to the WHOLE snapshot (see T6: `s.chat.nodes` is a stable live
-  // store whose reference never changes, so selecting it would never re-render
-  // — the top-level snapshot object IS swapped on every publication).
-  const snapshot = useSession((s) => s)
+  // DSH 0.1.6 moved the chat target OUT of the session snapshot (`snapshot.chat`
+  // is gone; SessionSnapshot only carries session state now) into the
+  // session-scoped `useChat` hook, whose selector receives the ChatSnapshot.
+  // Fall back to the legacy `session.chat` path when the framework does not
+  // inject `useChat` (older builds). Subscribe to the WHOLE snapshot:
+  // `s.nodes` is a stable live store whose reference never changes, so
+  // selecting it would never re-render 鈥?the top-level snapshot object IS
+  // swapped on every publication.
+  const chatHook = useChat !== undefined ? useChat : (selector: (s: any) => any) => selector(useSession((s) => s)?.chat)
+  const snapshot = chatHook((s: any) => s)
 
   // Per-node complete sentences already spoken (node.key -> count).
   const spokenRef = useRef(new Map<string, number>())
@@ -73,23 +80,23 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
   // snapshot can be EMPTY (session history loads asynchronously after a
   // restart), so a one-shot seed there would miss the history and every old
   // reply would replay. Instead we wait until the first SETTLED assistant
-  // node arrives, then set the baseline to the current max anchor — nothing
+  // node arrives, then set the baseline to the current max anchor 鈥?nothing
   // at or below it ever speaks. Live (running) nodes are never used for the
   // baseline, so a fresh reply in a brand-new session still speaks.
   const baselineRef = useRef<number | null>(null)
   // Anchor of the FIRST assistant node observed streaming in (a live reply).
   // Used to tell "history loading" apart from "a fresh reply in a new session"
   // when the first settled node arrives: history nodes never stream, so if we
-  // saw a running node, the settled node is the live reply — the baseline
+  // saw a running node, the settled node is the live reply 鈥?the baseline
   // must exclude it or the first reply of a session would never speak.
   const sawRunningRef = useRef<number | null>(null)
   // Serial TTS fetch chain: sentence N+1's fetch starts after N's resolves
-  // (playback drains independently through the speaker queue — pipelined).
+  // (playback drains independently through the speaker queue 鈥?pipelined).
   const chainRef = useRef<Promise<void>>(Promise.resolve())
   // Barge-in: swallow the CURRENT reply only. We record the exact anchor of
   // the reply being interrupted (never a "<= max" line): if the interrupt
   // flag is consumed after a NEW reply already appeared in the snapshot, a
-  // range-based skip would swallow that fresh reply too — the "new reply
+  // range-based skip would swallow that fresh reply too 鈥?the "new reply
   // never speaks" bug. Exact-anchor skip lets later replies play normally.
   const interruptRef = useRef(false)
   const skipAnchorRef = useRef(0)
@@ -110,7 +117,7 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
   }, [speaker, _registerTtsAbort])
 
   // Fresh-session guard: if no history has settled shortly after mount, the
-  // session is new (or history is empty) — freeze the baseline at 0 so the
+  // session is new (or history is empty) 鈥?freeze the baseline at 0 so the
   // very first reply speaks instead of being consumed as "history".
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -128,7 +135,7 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
 
     // Reading is on: make sure the bridge is reachable (the node-half
     // watchdog re-spawns it when down; this waits for /api/health to answer).
-    // Idempotent — a quick probe when the bridge is already up.
+    // Idempotent 鈥?a quick probe when the bridge is already up.
     void ensureBridgeReady()
 
     // Barge-in swallowed the CURRENT reply: remember its exact anchor so only
@@ -137,7 +144,7 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
     // handled by interruptReply itself.)
     if (interruptRef.current) {
       let maxAnchor = 0
-      for (const node of snapshot.chat.nodes.values()) {
+      for (const node of (snapshot?.nodes?.values() ?? [])) {
         if (node.kind === 'assistant-step' && node.anchorSeq > maxAnchor) maxAnchor = node.anchorSeq
       }
       if (maxAnchor > 0) skipAnchorRef.current = maxAnchor
@@ -148,13 +155,13 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
     // First settled assistant node arrives: freeze the history baseline so
     // pre-existing replies never replay (page load, session revisit, history
     // pagination). If we watched the reply stream in (sawRunningRef), it is
-    // the current live reply — baseline = highest settled anchor BELOW its
+    // the current live reply 鈥?baseline = highest settled anchor BELOW its
     // anchor, so the fresh reply still speaks; otherwise it is a pure history
     // load and the baseline swallows everything at or below the max anchor.
     if (baselineRef.current === null) {
       let maxAnchor = 0
       let hasSettled = false
-      for (const node of snapshot.chat.nodes.values()) {
+      for (const node of (snapshot?.nodes?.values() ?? [])) {
         if (node.kind !== 'assistant-step') continue
         const data = assistantData(node)
         if (data === undefined) continue
@@ -168,7 +175,7 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
         if (sawRunningRef.current !== null) {
           const liveAnchor = sawRunningRef.current
           let histAnchor = 0
-          for (const node of snapshot.chat.nodes.values()) {
+          for (const node of (snapshot?.nodes?.values() ?? [])) {
             if (node.kind !== 'assistant-step') continue
             if (node.anchorSeq < liveAnchor && node.anchorSeq > histAnchor) histAnchor = node.anchorSeq
           }
@@ -185,10 +192,10 @@ export const ReplySpeakerMount = memo(function ReplySpeakerMount({
     // Collect the complete sentences that are new (beyond each node's spoken
     // count), in (anchor, index) order. A SETTLED node also flushes its
     // trailing partial (the reply ended without a terminal punctuation, like
-    // a credit line) — mirroring the original backend's end-of-response
+    // a credit line) 鈥?mirroring the original backend's end-of-response
     // flush; running nodes wait for the partial to complete.
     const jobs: { anchor: number; key: string; index: number; sentence: string }[] = []
-    for (const node of snapshot.chat.nodes.values()) {
+    for (const node of (snapshot?.nodes?.values() ?? [])) {
       if (node.kind !== 'assistant-step') continue
       if (node.anchorSeq <= skipUntilRef.current) continue
       if (node.anchorSeq === skipAnchorRef.current) continue

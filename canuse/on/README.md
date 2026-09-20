@@ -119,6 +119,10 @@ POST /api/stt  (16kHz PCM16/wav)   → {text, language}
 - **2026-09-20 面板位置修复**：0.1.6 的输入框行带 `container-type: inline-size`，它使该行成为 `position: fixed` 后代的包含块 —— 音色管理面板原先"铺满视口、右上角"的浮层因此被限制在输入框行内（看起来贴在最下方）。已改为相对输入框行**向上弹出**的浮层：`position:absolute; inset:auto 0 100% 0`、无全屏遮罩、高度上限 `min(60vh,520px)`、面板 `pointer-events:auto`。
   - 已同步：live + golden 的 `lib/client.js`（新 rev `9867c98c4cf4`）、仓库源码 `plugin/src/client/VoiceManager.module.css`、开发源 `E:\AI\packages\client\ui-voice\src\client\VoiceManager.module.css`。
   - 生效方式：F5。
+- **2026-09-20 朗读链路修复（重要）**：0.1.6 的 `SessionSnapshot`（`dsh-api-session-controller`）**不再包含 `chat` 字段**，聊天快照改由会话级插槽属性 **`useChat`** 提供。朗读监听原先读 `snapshot.chat.nodes` → 每次执行都抛 `TypeError` → **回复永不被朗读**（桥接日志里 `/api/tts` 恒为 0，而 health/voices 正常）。
+  - 修复：改为 `useChat((s) => s)` 取 ChatSnapshot（`snapshot.nodes.values()`），并在框架未注入 `useChat` 时回退到旧的 `useSession((s) => s)?.chat`；4 处节点遍历改为 `(snapshot?.nodes?.values() ?? [])`。
+  - 已同步：live + golden 的 `lib/client.js`（新 rev `a6d002d3ee56`）、仓库源码 `plugin/src/client/voice/reply-listener.tsx`。
+  - 生效方式：F5。
 
 ## 与 off/ 的关系
 
