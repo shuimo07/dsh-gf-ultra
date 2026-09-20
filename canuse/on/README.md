@@ -112,6 +112,10 @@ POST /api/stt  (16kHz PCM16/wav)   → {text, language}
 - 自愈修复插件后无需重启 web：DSH 按请求读文件、rev = 文件 SHA1（实测 rev `a939c5079090 → a8d1d8c68eee → 14bd10acc0b7`）。
 - **web 重启**：桥接是独立进程，不会随 web 自动重启——web 重启后桥接需手动拉起（方式一/二/三）。node 半端已恢复为带 `/voice-bridge/start|stop` 的版本（live+golden 同步），**2026-08-18 02:51 重启（pid 18788）后已生效**：路由实测返回 `{"ok":true,"running":true}`，点击朗读开关即可自动拉起桥接（2026-09-20 新版 web 下该路由仍免 token 可用）。
 - **2026-09-20 复核**：DSH web 升级为带令牌鉴权（未带 token 的 HTTP → 404，根响应 `dsh web authentication required`）；语音模块不受影响——插件文件/音色/桥接全部复检通过，TTS+STT 闭环重测通过，自愈已适配鉴权门（`consistent=True`）。
+- **2026-09-20 兼容修复（重要）**：DSH 已升级到 **0.1.6-alpha.2**，该版本**删除了 `@deepseek-ai/dsh-client-runtime` 包**（由 `dsh-client-connection` 取代）。插件 `package.json` 的 `dsh.client.inject` 原声明了它 → 浏览器端加载器会一直等待这个不再存在的插件 id → **ui-voice 永不挂载**（症状：界面里没有麦克风/喇叭按钮、不朗读；而桥接侧只会看到零星 health 轮询，`/api/voices` 与 `/api/tts` 均为 0）。
+  - 修复：从 `dsh.client.inject` 中删除 `@deepseek-ai/dsh-client-runtime`（其余两项 `dsh-client-locale`、`dsh-client-ui-conversation` 在 0.1.6 仍存在）。
+  - 已同步 4 处：live（`E:\.dsh\profiles\web\node_modules\@deepseek-ai\dsh-client-ui-voice\package.json`）、golden（`dist\ui-voice\package.json`）、仓库源码（`plugin\package.json`）、开发源（`E:\AI\packages\client\ui-voice\package.json`）。
+  - 生效方式：**F5 即可**（宿主按请求读插件文件）；若刷新后按钮仍未出现，说明该实例的客户端插件清单在启动时已固化，需要重启 web 才生效。
 
 ## 与 off/ 的关系
 

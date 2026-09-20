@@ -18,6 +18,7 @@
 - web 实际下发：`/plugins/@deepseek-ai/dsh-client-ui-voice/client.js` 响应体哈希 = `CC2AFB8F…`（= golden）；boot HTML `rev = 14bd10acc0b7`（= 文件 SHA1，替换后按请求重算）
   - **2026-09-20 起**：web 加了访问令牌鉴权，未带 token 的探测请求返回 404 → 自愈里的"web 下发"检查标记为 `unverifiable`（**不再算作漂移**）；带 token 的浏览器会话仍正常拿到插件包
 - node 半端 `lib/index.js` = 增强版（4,725 B，带 `/voice-bridge/start|stop` 路由，2026-08-18 恢复，live+golden 同步）：**已生效**——`POST /voice-bridge/start` 实测返回 `{"ok":true,"running":true}`（2026-08-18 02:53），桥接掉线时点击朗读开关即可自动拉起
+- **2026-09-20 兼容修复**：DSH 升级到 **0.1.6-alpha.2** 后删除了 `@deepseek-ai/dsh-client-runtime`；插件 manifest 曾声明该依赖 → 客户端加载器等待不存在的插件 id → **ui-voice 不挂载**（无按钮、不朗读；桥接侧 `/api/voices`、`/api/tts` 计数为 0）。已从 `dsh.client.inject` 移除该项，live/golden/仓库源码/开发源 4 处同步；修复后 `consistent=True`，F5 即可生效（若无效则需重启 web）
 
 ## 三、音色库
 
